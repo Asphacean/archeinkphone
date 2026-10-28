@@ -1,0 +1,49 @@
+From: Palma 2 bring-up <none@none>
+Subject: [PATCH] drm/msm/dsi: palma2: HS timer and BLLP knobs
+
+Apply a longer HS_TIMER_CTRL at enable (msm.dsi_hs_timer) and add msm.dsi_bllp_hs
+to keep data lanes in HS during BLLP.
+---
+--- a/drivers/gpu/drm/msm/dsi/dsi_host.c	2026-10-26 13:55:23
++++ b/drivers/gpu/drm/msm/dsi/dsi_host.c	2026-10-26 13:55:23
+@@ -84,6 +84,19 @@
+ 		}
+ 	}
+ }
++
++/*
++ * Palma 2 bring-up knobs (/sys/module/msm/parameters/): the hardware default
++ * HS_TIMER_CTRL (0xffff, resolution 0) times out on a full-frame HS burst in
++ * non-burst video mode with HS porches; bllp_hs keeps the data lanes in HS
++ * during BLLP (no LP-11 at vblank), as a test knob for the FPGA TCON.
++ */
++static unsigned int dsi_hs_timer = 0x000fffff;
++module_param(dsi_hs_timer, uint, 0644);
++MODULE_PARM_DESC(dsi_hs_timer, "DSI HS_TIMER_CTRL value applied at enable (0 = keep hw default)");
++static bool dsi_bllp_hs;
++module_param(dsi_bllp_hs, bool, 0644);
++MODULE_PARM_DESC(dsi_bllp_hs, "keep data lanes in HS during BLLP (no BLLP power stop)");
+ 
+ #define DSI_ERR_STATE_ACK			0x0000
+ #define DSI_ERR_STATE_TIMEOUT			0x0001
+@@ -823,8 +836,9 @@
+ 		/* Always set low power stop mode for BLLP
+ 		 * to let command engine send packets
+ 		 */
+-		data |= DSI_VID_CFG0_EOF_BLLP_POWER_STOP |
+-			DSI_VID_CFG0_BLLP_POWER_STOP;
++		if (!dsi_bllp_hs)
++			data |= DSI_VID_CFG0_EOF_BLLP_POWER_STOP |
++				DSI_VID_CFG0_BLLP_POWER_STOP;
+ 		data |= DSI_VID_CFG0_TRAFFIC_MODE(dsi_get_traffic_mode(flags));
+ 		data |= DSI_VID_CFG0_DST_FORMAT(dsi_get_vid_fmt(mipi_fmt));
+ 		data |= DSI_VID_CFG0_VIRT_CHANNEL(msm_host->channel);
+@@ -879,6 +893,8 @@
+ 	data = DSI_CLKOUT_TIMING_CTRL_T_CLK_POST(phy_shared_timings->clk_post) |
+ 		DSI_CLKOUT_TIMING_CTRL_T_CLK_PRE(phy_shared_timings->clk_pre);
+ 	dsi_write(msm_host, REG_DSI_CLKOUT_TIMING_CTRL, data);
++	if (dsi_hs_timer)
++		dsi_write(msm_host, REG_DSI_HS_TIMER_CTRL, dsi_hs_timer);
+ 
+ 	if ((cfg_hnd->major == MSM_DSI_VER_MAJOR_6G) &&
+ 	    (cfg_hnd->minor > MSM_DSI_6G_VER_MINOR_V1_0) &&

@@ -1,0 +1,104 @@
+diff -ruN tree.p8/drivers/gpu/drm/msm/dsi/dsi_host.c tree/drivers/gpu/drm/msm/dsi/dsi_host.c
+--- a/drivers/gpu/drm/msm/dsi/dsi_host.c	2026-10-26 19:34:19
++++ b/drivers/gpu/drm/msm/dsi/dsi_host.c	2026-10-26 19:34:42
+@@ -2273,10 +2273,17 @@
+ 	pm_runtime_put(&msm_host->pdev->dev);
+ }
+ 
++/* Palma 2 experiment: swallow all DCS/generic command transfers (no DMA, no LP/HS cmd packets) */
++static bool dsi_cmd_block;
++module_param(dsi_cmd_block, bool, 0644);
++
+ int msm_dsi_host_cmd_tx(struct mipi_dsi_host *host,
+ 				const struct mipi_dsi_msg *msg)
+ {
+ 	struct msm_dsi_host *msm_host = to_msm_dsi_host(host);
++
++	if (dsi_cmd_block)
++		return msg->tx_len;
+ 
+ 	return dsi_cmds2buf_tx(msm_host, msg);
+ }
+diff -ruN tree.p8/drivers/gpu/drm/msm/dsi/dsi_manager.c tree/drivers/gpu/drm/msm/dsi/dsi_manager.c
+--- a/drivers/gpu/drm/msm/dsi/dsi_manager.c	2026-10-26 19:34:19
++++ b/drivers/gpu/drm/msm/dsi/dsi_manager.c	2026-10-26 19:34:42
+@@ -5,9 +5,26 @@
+ 
+ #include "drm/drm_bridge_connector.h"
+ 
++#include <linux/delay.h>
+ #include "msm_kms.h"
+ #include "dsi.h"
+ 
++/*
++ * Palma 2 enable-order experiments (all runtime, effective on the next modeset):
++ * dsi_vid_on_at: 0 = VID_MODE_EN in bridge pre_enable (mainline), 1 = in bridge
++ *   enable, i.e. after the DPU INTF timing engine has started (stock-like "INTF
++ *   first"), 2 = never (manual).
++ * dsi_pre_vid_ms: sleep between host power-on and the video enable.
++ * dsi_post_vid_ms: sleep after the video enable before returning from pre_enable
++ *   (delays panel prepare + INTF start relative to the video engine).
++ */
++static unsigned int dsi_vid_on_at;
++module_param(dsi_vid_on_at, uint, 0644);
++static unsigned int dsi_pre_vid_ms;
++module_param(dsi_pre_vid_ms, uint, 0644);
++static unsigned int dsi_post_vid_ms;
++module_param(dsi_post_vid_ms, uint, 0644);
++
+ #define DSI_CLOCK_MASTER	DSI_0
+ #define DSI_CLOCK_SLAVE		DSI_1
+ 
+@@ -296,12 +313,22 @@
+ 		return;
+ 	}
+ 
+-	ret = msm_dsi_host_enable(host);
+-	if (ret) {
+-		pr_err("%s: enable host %d failed, %d\n", __func__, id, ret);
+-		goto host_en_fail;
++	if (dsi_pre_vid_ms)
++		msleep(dsi_pre_vid_ms);
++
++	if (dsi_vid_on_at == 0) {
++		ret = msm_dsi_host_enable(host);
++		if (ret) {
++			pr_err("%s: enable host %d failed, %d\n", __func__, id, ret);
++			goto host_en_fail;
++		}
++	} else {
++		pr_info("%s: video engine enable deferred (dsi_vid_on_at=%u)\n", __func__, dsi_vid_on_at);
+ 	}
+ 
++	if (dsi_post_vid_ms)
++		msleep(dsi_post_vid_ms);
++
+ 	if (is_bonded_dsi && msm_dsi1) {
+ 		ret = msm_dsi_host_enable(msm_dsi1->host);
+ 		if (ret) {
+@@ -444,9 +471,25 @@
+ 				 bridge, flags);
+ }
+ 
++static void dsi_mgr_bridge_enable(struct drm_bridge *bridge)
++{
++	int id = dsi_mgr_bridge_get_id(bridge);
++	struct msm_dsi *msm_dsi = dsi_mgr_get_dsi(id);
++	int ret;
++
++	if (dsi_vid_on_at != 1)
++		return;
++	if (IS_BONDED_DSI() && !IS_MASTER_DSI_LINK(id))
++		return;
++
++	ret = msm_dsi_host_enable(msm_dsi->host);
++	pr_info("%s: video engine enabled after INTF start (ret %d)\n", __func__, ret);
++}
++
+ static const struct drm_bridge_funcs dsi_mgr_bridge_funcs = {
+ 	.attach = dsi_mgr_bridge_attach,
+ 	.pre_enable = dsi_mgr_bridge_pre_enable,
++	.enable = dsi_mgr_bridge_enable,
+ 	.post_disable = dsi_mgr_bridge_post_disable,
+ 	.mode_set = dsi_mgr_bridge_mode_set,
+ 	.mode_valid = dsi_mgr_bridge_mode_valid,

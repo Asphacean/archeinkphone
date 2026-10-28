@@ -1,0 +1,1 @@
+user ALL=(root) NOPASSWD: /usr/local/bin/palma-contrast, /usr/local/bin/palma-contrast *, /usr/local/bin/palma-light, /usr/local/bin/palma-light *, /usr/local/bin/palma-epd, /usr/local/bin/palma-epd *

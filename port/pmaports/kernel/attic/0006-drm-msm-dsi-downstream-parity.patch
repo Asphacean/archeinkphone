@@ -1,0 +1,114 @@
+From: Palma 2 bring-up <none@none>
+Subject: [PATCH] drm/msm/dsi: downstream-parity reset and late video engine enable (palma2)
+
+---
+--- a/drivers/gpu/drm/msm/dsi/dsi_host.c	2026-10-26 17:03:17
++++ b/drivers/gpu/drm/msm/dsi/dsi_host.c	2026-10-26 17:03:32
+@@ -92,6 +92,19 @@
+  * during BLLP (no LP-11 at vblank), as a test knob for the FPGA TCON.
+  */
+ static unsigned int dsi_hs_timer = 0x000fffff;
++/*
++ * Downstream (msm-4.19 dsi_ctrl_hw_cmn.c) parity knobs for the Palma 2 FPGA TCON:
++ * dsi_ds_reset: soft reset with the dynamic clock domains forced on (CLK_CTRL
++ *   |= BIT8|BIT9|BIT11|BIT21, value 0x200b3f as in the stock kernel) and the
++ *   stock PHY_SW_RESET value 0x01000001 (BIT24 undocumented upstream).
++ * dsi_vid_delay_ms: keep VID_MODE_EN off at host enable and only turn the video
++ *   engine on this many ms later, after the panel's DCS init sequence
++ *   (downstream sends panel ON commands with the video engine disabled).
++ */
++static bool dsi_ds_reset;
++module_param(dsi_ds_reset, bool, 0644);
++static unsigned int dsi_vid_delay_ms;
++module_param(dsi_vid_delay_ms, uint, 0644);
+ module_param(dsi_hs_timer, uint, 0644);
+ MODULE_PARM_DESC(dsi_hs_timer, "DSI HS_TIMER_CTRL value applied at enable (0 = keep hw default)");
+ static bool dsi_bllp_hs;
+@@ -162,6 +175,7 @@
+ 	u32 err_work_state;
+ 	u32 err_raw[6];
+ 	struct work_struct err_work;
++	struct delayed_work vid_on_work;
+ 	struct workqueue_struct *workqueue;
+ 
+ 	/* DSI 6G TX buffer*/
+@@ -1156,7 +1170,8 @@
+ 		wmb();
+ 	}
+ 
+-	dsi_write(msm_host, REG_DSI_CLK_CTRL, DSI_CLK_CTRL_ENABLE_CLKS);
++	dsi_write(msm_host, REG_DSI_CLK_CTRL, DSI_CLK_CTRL_ENABLE_CLKS |
++		  (dsi_ds_reset ? (BIT(8) | BIT(9) | BIT(11) | BIT(21)) : 0));
+ 	wmb(); /* clocks need to be enabled before reset */
+ 
+ 	/* dsi controller can only be reset while clocks are running */
+@@ -1164,6 +1179,10 @@
+ 	msleep(DSI_RESET_TOGGLE_DELAY_MS); /* make sure reset happen */
+ 	dsi_write(msm_host, REG_DSI_RESET, 0);
+ 	wmb(); /* controller out of reset */
++	if (dsi_ds_reset) {
++		dsi_write(msm_host, REG_DSI_CLK_CTRL, DSI_CLK_CTRL_ENABLE_CLKS);
++		wmb();
++	}
+ 
+ 	if (ctrl & DSI_CTRL_ENABLE) {
+ 		dsi_write(msm_host, REG_DSI_CTRL, ctrl);
+@@ -1179,13 +1198,18 @@
+ 	dsi_ctrl = dsi_read(msm_host, REG_DSI_CTRL);
+ 
+ 	if (!enable) {
++		cancel_delayed_work(&msm_host->vid_on_work);
+ 		dsi_ctrl &= ~(DSI_CTRL_ENABLE | DSI_CTRL_VID_MODE_EN |
+ 				DSI_CTRL_CMD_MODE_EN);
+ 		dsi_intr_ctrl(msm_host, DSI_IRQ_MASK_CMD_MDP_DONE |
+ 					DSI_IRQ_MASK_VIDEO_DONE, 0);
+ 	} else {
+ 		if (video_mode) {
+-			dsi_ctrl |= DSI_CTRL_VID_MODE_EN;
++			if (dsi_vid_delay_ms)
++				schedule_delayed_work(&msm_host->vid_on_work,
++						      msecs_to_jiffies(dsi_vid_delay_ms));
++			else
++				dsi_ctrl |= DSI_CTRL_VID_MODE_EN;
+ 		} else {		/* command mode */
+ 			dsi_ctrl |= DSI_CTRL_CMD_MODE_EN;
+ 			dsi_intr_ctrl(msm_host, DSI_IRQ_MASK_CMD_MDP_DONE, 1);
+@@ -1577,6 +1601,20 @@
+ 	}
+ 
+ 	return len;
++}
++
++static void dsi_vid_on_worker(struct work_struct *work)
++{
++	struct msm_dsi_host *msm_host =
++		container_of(to_delayed_work(work), struct msm_dsi_host, vid_on_work);
++	u32 ctrl;
++
++	if (!msm_host->power_on)
++		return;
++	ctrl = dsi_read(msm_host, REG_DSI_CTRL);
++	dsi_write(msm_host, REG_DSI_CTRL, ctrl | DSI_CTRL_VID_MODE_EN);
++	pr_info("%s: video engine on (CTRL %#x -> %#x)\n", __func__, ctrl,
++		ctrl | DSI_CTRL_VID_MODE_EN);
+ }
+ 
+ static void dsi_err_worker(struct work_struct *work)
+@@ -2109,6 +2147,7 @@
+ 		return -ENOMEM;
+ 
+ 	INIT_WORK(&msm_host->err_work, dsi_err_worker);
++	INIT_DELAYED_WORK(&msm_host->vid_on_work, dsi_vid_on_worker);
+ 
+ 	msm_dsi->id = msm_host->id;
+ 
+@@ -2406,7 +2445,8 @@
+ 	struct msm_dsi_host *msm_host = to_msm_dsi_host(host);
+ 
+ 	DBG("");
+-	dsi_write(msm_host, REG_DSI_PHY_RESET, DSI_PHY_RESET_RESET);
++	dsi_write(msm_host, REG_DSI_PHY_RESET,
++		  dsi_ds_reset ? 0x01000001 : DSI_PHY_RESET_RESET);
+ 	/* Make sure fully reset */
+ 	wmb();
+ 	udelay(1000);

@@ -1,0 +1,110 @@
+diff -ruN tree.orig/drivers/gpu/drm/msm/dsi/dsi.h tree/drivers/gpu/drm/msm/dsi/dsi.h
+--- a/drivers/gpu/drm/msm/dsi/dsi.h	2026-10-26 18:38:15
++++ b/drivers/gpu/drm/msm/dsi/dsi.h	2026-10-26 18:40:07
+@@ -150,6 +150,7 @@
+ int msm_dsi_phy_pll_restore_state(struct msm_dsi_phy *phy);
+ void msm_dsi_phy_snapshot(struct msm_disp_state *disp_state, struct msm_dsi_phy *phy);
+ bool msm_dsi_phy_set_continuous_clock(struct msm_dsi_phy *phy, bool enable);
++void msm_dsi_phy_late_clk_enable(struct msm_dsi_phy *phy);
+ 
+ #endif /* __DSI_CONNECTOR_H__ */
+ 
+diff -ruN tree.orig/drivers/gpu/drm/msm/dsi/dsi_host.c tree/drivers/gpu/drm/msm/dsi/dsi_host.c
+--- a/drivers/gpu/drm/msm/dsi/dsi_host.c	2026-10-26 18:38:15
++++ b/drivers/gpu/drm/msm/dsi/dsi_host.c	2026-10-26 18:40:07
+@@ -2592,6 +2592,7 @@
+ 	dsi_timing_setup(msm_host, is_bonded_dsi);
+ 	dsi_sw_reset(msm_host);
+ 	dsi_ctrl_enable(msm_host, phy_shared_timings, phy);
++	msm_dsi_phy_late_clk_enable(phy);
+ 
+ 	msm_host->power_on = true;
+ 	mutex_unlock(&msm_host->dev_mutex);
+diff -ruN tree.orig/drivers/gpu/drm/msm/dsi/phy/dsi_phy.c tree/drivers/gpu/drm/msm/dsi/phy/dsi_phy.c
+--- a/drivers/gpu/drm/msm/dsi/phy/dsi_phy.c	2026-10-26 18:38:15
++++ b/drivers/gpu/drm/msm/dsi/phy/dsi_phy.c	2026-10-26 18:40:07
+@@ -824,6 +824,12 @@
+ 	return phy->cfg->ops.set_continuous_clock(phy, enable);
+ }
+ 
++void msm_dsi_phy_late_clk_enable(struct msm_dsi_phy *phy)
++{
++	if (phy && phy->cfg->ops.late_clk_enable)
++		phy->cfg->ops.late_clk_enable(phy);
++}
++
+ void msm_dsi_phy_pll_save_state(struct msm_dsi_phy *phy)
+ {
+ 	if (phy->cfg->ops.save_pll_state) {
+diff -ruN tree.orig/drivers/gpu/drm/msm/dsi/phy/dsi_phy.h tree/drivers/gpu/drm/msm/dsi/phy/dsi_phy.h
+--- a/drivers/gpu/drm/msm/dsi/phy/dsi_phy.h	2026-10-26 18:38:15
++++ b/drivers/gpu/drm/msm/dsi/phy/dsi_phy.h	2026-10-26 18:40:07
+@@ -22,6 +22,7 @@
+ 	int (*restore_pll_state)(struct msm_dsi_phy *phy);
+ 	bool (*set_continuous_clock)(struct msm_dsi_phy *phy, bool enable);
+ 	int (*parse_dt_properties)(struct msm_dsi_phy *phy);
++	void (*late_clk_enable)(struct msm_dsi_phy *phy);
+ };
+ 
+ struct msm_dsi_phy_cfg {
+diff -ruN tree.orig/drivers/gpu/drm/msm/dsi/phy/dsi_phy_10nm.c tree/drivers/gpu/drm/msm/dsi/phy/dsi_phy_10nm.c
+--- a/drivers/gpu/drm/msm/dsi/phy/dsi_phy_10nm.c	2026-10-26 18:38:15
++++ b/drivers/gpu/drm/msm/dsi/phy/dsi_phy_10nm.c	2026-10-26 18:59:16
+@@ -168,6 +168,18 @@
+ static bool pll_ssc = true;
+ module_param(pll_ssc, bool, 0644);
+ MODULE_PARM_DESC(pll_ssc, "enable DSI 10nm PLL spread spectrum (stock: on)");
++/*
++ * Stock (msm-4.19 dsi_phy_hw_v3_0 + dsi_pll_10nm) enables the PLL global clock
++ * (CMN_CLK_CFG1 bit 5) and the resync FIFO (CMN_RBUF_CTRL) only after the DSI
++ * controller is fully set up (CTRL=0x1f1, timing, soft reset), ~50 ms before the
++ * video engine is switched on. Mainline does both inside vco_prepare(), before
++ * the controller is touched. late_rbuf=Y moves the RBUF enable (not the global
++ * clock: the controller needs its byte clock for the soft reset, otherwise the
++ * AHB hangs -- r11 boot) to msm_dsi_host_power_on() after dsi_ctrl_enable().
++ */
++static bool late_rbuf;
++module_param(late_rbuf, bool, 0644);
++MODULE_PARM_DESC(late_rbuf, "enable PHY global clk + resync FIFO after DSI ctrl setup (stock order)");
+ 
+ static void dsi_pll_setup_config(struct dsi_pll_config *config)
+ {
+@@ -437,6 +449,10 @@
+ 	if (pll_10nm->slave)
+ 		dsi_pll_enable_global_clk(pll_10nm->slave);
+ 
++	/* late_rbuf: resync FIFO is enabled from msm_dsi_host_power_on() instead */
++	if (late_rbuf)
++		goto error;
++
+ 	writel(0x01, pll_10nm->phy->base + REG_DSI_10nm_PHY_CMN_RBUF_CTRL);
+ 	if (pll_10nm->slave)
+ 		writel(0x01, pll_10nm->slave->phy->base + REG_DSI_10nm_PHY_CMN_RBUF_CTRL);
+@@ -1066,6 +1082,19 @@
+ 	{ .supply = "vdds", .init_load_uA = 36000 },
+ };
+ 
++static void dsi_10nm_phy_late_clk_enable(struct msm_dsi_phy *phy)
++{
++	if (!late_rbuf || !phy->pll_on)
++		return;
++
++	writel(0x00, phy->base + REG_DSI_10nm_PHY_CMN_RBUF_CTRL);
++	wmb();
++	udelay(10);
++	writel(0x01, phy->base + REG_DSI_10nm_PHY_CMN_RBUF_CTRL);
++	pr_info("dsi_10nm: late RBUF enable (CLK_CFG1 %#x)\n",
++		readl(phy->base + REG_DSI_10nm_PHY_CMN_CLK_CFG1));
++}
++
+ const struct msm_dsi_phy_cfg dsi_phy_10nm_cfgs = {
+ 	.has_phy_lane = true,
+ 	.regulator_data = dsi_phy_10nm_regulators,
+@@ -1077,6 +1106,7 @@
+ 		.save_pll_state = dsi_10nm_pll_save_state,
+ 		.restore_pll_state = dsi_10nm_pll_restore_state,
+ 		.parse_dt_properties = dsi_10nm_phy_parse_dt,
++		.late_clk_enable = dsi_10nm_phy_late_clk_enable,
+ 	},
+ 	.min_pll_rate = 1000000000UL,
+ 	.max_pll_rate = 3500000000UL,

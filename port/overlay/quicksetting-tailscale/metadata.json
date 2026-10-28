@@ -1,0 +1,10 @@
+{
+    "KPackageStructure": "KPackage/GenericQML",
+    "KPlugin": {
+        "Description": "Tailscale on/off",
+        "Icon": "network-vpn",
+        "Id": "org.palma2.quicksetting.tailscale",
+        "License": "GPL",
+        "Name": "Tailscale"
+    }
+}

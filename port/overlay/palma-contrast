@@ -1,0 +1,10 @@
+#!/bin/sh
+# palma-contrast [0-255]: set (and redraw) or print the e-ink TCON contrast; persisted in modprobe.d
+P=/sys/module/panel_onyx_palma2_tcon/parameters/tcon_contrast
+C=/etc/modprobe.d/palma2-contrast.conf
+if [ -n "$1" ]; then
+	v=$(( $1 > 255 ? 255 : $1 ))
+	if [ -w "$P" ]; then echo "$v" > "$P"; else /usr/local/bin/palma_tcon_reg.py 0x05 "$v" --gc >/dev/null; fi
+	echo "options panel_onyx_palma2_tcon tcon_contrast=$v" > "$C"
+fi
+if [ -r "$P" ]; then cat "$P"; else sed -n 's/.*tcon_contrast=//p' "$C" 2>/dev/null || echo 64; fi

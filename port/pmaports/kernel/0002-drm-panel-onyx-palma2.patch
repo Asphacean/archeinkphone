@@ -1,0 +1,651 @@
+diff -ruN p2.orig/drivers/gpu/drm/panel/Kconfig p2/drivers/gpu/drm/panel/Kconfig
+--- p2.orig/drivers/gpu/drm/panel/Kconfig	2026-10-27 00:44:01
++++ p2/drivers/gpu/drm/panel/Kconfig	2026-10-27 00:43:34
+@@ -687,6 +687,17 @@
+ 	  Say Y here if you want to enable support for Olimex Ltd.
+ 	  LCD-OLinuXino panel.
+ 
++config DRM_PANEL_ONYX_PALMA2_TCON
++	tristate "Onyx Boox Palma 2 e-ink TCON panel"
++	depends on OF
++	depends on DRM_MIPI_DSI
++	help
++	  Say Y here if you want to enable support for the e-ink panel of the
++	  Onyx Boox Palma 2. The panel sits behind a Lattice CertusPro-NX TCON
++	  that presents itself as a 4-lane DSI video-mode sink (1648x824
++	  RGB888). The driver powers the FPGA and sets up the DSI link; the
++	  TCON command port (I2C) is driven from user space.
++
+ config DRM_PANEL_ORISETECH_OTA5601A
+         tristate "Orise Technology ota5601a RGB/SPI panel"
+         depends on SPI
+diff -ruN p2.orig/drivers/gpu/drm/panel/Makefile p2/drivers/gpu/drm/panel/Makefile
+--- p2.orig/drivers/gpu/drm/panel/Makefile	2026-10-27 00:44:01
++++ p2/drivers/gpu/drm/panel/Makefile	2026-10-27 00:43:34
+@@ -67,6 +67,7 @@
+ obj-$(CONFIG_DRM_PANEL_NOVATEK_NT39016) += panel-novatek-nt39016.o
+ obj-$(CONFIG_DRM_PANEL_MANTIX_MLAF057WE51) += panel-mantix-mlaf057we51.o
+ obj-$(CONFIG_DRM_PANEL_OLIMEX_LCD_OLINUXINO) += panel-olimex-lcd-olinuxino.o
++obj-$(CONFIG_DRM_PANEL_ONYX_PALMA2_TCON) += panel-onyx-palma2-tcon.o
+ obj-$(CONFIG_DRM_PANEL_ORISETECH_OTA5601A) += panel-orisetech-ota5601a.o
+ obj-$(CONFIG_DRM_PANEL_ORISETECH_OTM8009A) += panel-orisetech-otm8009a.o
+ obj-$(CONFIG_DRM_PANEL_OSD_OSD101T2587_53TS) += panel-osd-osd101t2587-53ts.o
+diff -ruN p2.orig/drivers/gpu/drm/panel/panel-onyx-palma2-tcon.c p2/drivers/gpu/drm/panel/panel-onyx-palma2-tcon.c
+--- p2.orig/drivers/gpu/drm/panel/panel-onyx-palma2-tcon.c	1970-01-01 03:00:00
++++ p2/drivers/gpu/drm/panel/panel-onyx-palma2-tcon.c	2026-10-27 14:14:44
+@@ -0,0 +1,615 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Onyx Boox Palma 2 e-ink panel: EPD behind a Lattice CertusPro-NX TCON (FPGA).
++ *
++ * To the SoC this is a plain 4-lane DSI video-mode sink, 1648x824 RGB888 @ 60 Hz
++ * (landscape; the TCON rotates).  The FPGA self-loads its bitstream from its own
++ * SPI flash once its rails are up and RESET is released; what to do with a frame
++ * is told through pixel (0,0) of that frame plus a 2-byte I2C command at 0x34.
++ * The I2C side is deliberately left to user space for now (tools/palma_epd_test.py).
++ *
++ * Power/GPIO sequence, delays and polarities come from the stock 4.19 driver
++ * (lfe5u_power_ctrl, lfe5u_config_done_wait, lfe5u_load_fw) and the stock DT
++ * (qcom,mdss_dsi_rm69299_visionox_amoled_video with onyx,tcon-mode-support).
++ */
++
++#include <linux/delay.h>
++#include <linux/gpio/consumer.h>
++#include <linux/i2c.h>
++#include <linux/jiffies.h>
++#include <linux/notifier.h>
++#include <linux/of.h>
++#include <linux/workqueue.h>
++#include <linux/module.h>
++
++static unsigned long dsi_flags_override;
++module_param(dsi_flags_override, ulong, 0444);
++MODULE_PARM_DESC(dsi_flags_override, "override MIPI DSI mode flags (0 = driver default)");
++static unsigned int dsi_lanes_override;
++module_param(dsi_lanes_override, uint, 0444);
++/*
++ * The DSI mode is 1648x824 (landscape) while the device is a portrait reader:
++ * the framebuffer's top edge is the device's left edge when the USB port points
++ * down. Report that to DRM so fbcon (with FRAMEBUFFER_CONSOLE_ROTATION) and
++ * Wayland compositors rotate; 0 normal, 1 bottom-up, 2 left-up, 3 right-up.
++ */
++static int orientation = 2;	/* DRM_MODE_PANEL_ORIENTATION_LEFT_UP; enum not yet included here */
++module_param(orientation, int, 0444);
++MODULE_PARM_DESC(dsi_lanes_override, "override DSI lane count (0 = 4)");
++#include <linux/regulator/consumer.h>
++
++#include <drm/drm_mipi_dsi.h>
++#include <drm/drm_modes.h>
++#include <drm/drm_panel.h>
++#include <drm/drm_probe_helper.h>
++
++struct palma2_tcon {
++	struct drm_panel panel;
++	struct mipi_dsi_device *dsi;
++	struct regulator *vdd1v8;	/* L5A, FPGA 1.8 V */
++	struct regulator *vdd1v2;	/* L3E, FPGA 1.2 V (stock "1.2 V IO" slot) */
++	struct gpio_desc *reset;	/* DSI panel reset, PM6150L GPIO9 */
++	/* FPGA rails and sysCONFIG pins; present as a set or not at all */
++	struct gpio_desc *fpga_reset;	/* tlmm 122, active low */
++	struct gpio_desc *standby;	/* tlmm 96, active low */
++	struct gpio_desc *programn;	/* tlmm 38, PROGRAMN, active low */
++	struct gpio_desc *done;		/* tlmm 8, DONE, active high */
++	struct gpio_desc *pwr_30v;	/* tlmm 97, panel HV supply enable */
++	struct gpio_desc *pwr_12v_core;	/* tlmm 58, FPGA core 1.2 V enable */
++	/* e-ink refresh trigger: TCON control port on I2C (0x34) + DPU commit notifier */
++	struct i2c_client *tcon;
++	struct notifier_block commit_nb;
++	struct delayed_work refresh_work;
++	struct delayed_work init_work;
++	unsigned long last_cmd;		/* jiffies of the last UI_MODE_SET */
++	unsigned int since_gc;		/* screen area changed since the last GC16, in 1/1000 of the screen */
++	atomic_t dmg_pending;		/* damage of the commits not yet refreshed, same unit */
++	bool pending;			/* a commit is waiting for refresh_work */
++	bool fast_dirty;		/* the last update used refresh_fast_mode, a settle update is due */
++	bool force_gc;			/* refresh_now: GC16 once the TCON is idle */
++	unsigned long last_big;		/* jiffies of the last commit that counted towards GC16 */
++	bool enabled;
++};
++
++/* TCON registers (stock lfe5u_*): 0x07 UI_MODE_SET, 0x08 VCOM (vcom-50), 0x20..0x23 state */
++#define TCON_REG_UI_MODE	0x07
++#define TCON_REG_CONTRAST	0x05
++#define TCON_REG_VCOM		0x08
++#define TCON_MODE_GC16		0x01
++#define TCON_MODE_DU		0x12
++#define TCON_MODE_REGAL		0x15
++#define TCON_MODE_SYNC		0x20
++
++static unsigned int refresh_mode = TCON_MODE_REGAL;	/* per-commit waveform; stock partial updates are REGAL (DT epdc-gu-regal-enable) */
++module_param(refresh_mode, uint, 0644);
++static unsigned int refresh_gc_min = 30;		/* GC16 after a quiet period once this % of the screen changed, 0 = off */
++module_param(refresh_gc_min, uint, 0644);
++static unsigned int refresh_gc_hard = 10;		/* forced GC16 once this many full screens' worth changed (stock: every 20 updates), 0 = off */
++module_param(refresh_gc_hard, uint, 0644);
++static unsigned int refresh_gc_idle_ms = 3000;		/* the quiet period */
++module_param(refresh_gc_idle_ms, uint, 0644);
++static unsigned int refresh_fast_mode = 0x14;		/* A2-like 1-bit waveform for back-to-back updates (scrolling), 0 = off */
++module_param(refresh_fast_mode, uint, 0644);
++static unsigned int refresh_burst_ms = 400;		/* an update this soon after the previous one counts as a burst */
++module_param(refresh_burst_ms, uint, 0644);
++static unsigned int refresh_settle_ms = 250;		/* quiet time before the refresh_mode redraw that follows a burst */
++module_param(refresh_settle_ms, uint, 0644);
++static unsigned int refresh_last_damage;		/* damage of the latest commit, 1/1000 of the screen (read-only, for tuning) */
++module_param(refresh_last_damage, uint, 0444);
++static unsigned int refresh_gc_small = 50;		/* commits changing less than this (1/1000 of the screen) do not count towards GC16 */
++module_param(refresh_gc_small, uint, 0644);
++static unsigned int refresh_debounce_ms = 0;		/* coalesce commits */
++module_param(refresh_debounce_ms, uint, 0644);
++static unsigned int refresh_min_gap_ms = 90;
++module_param(refresh_min_gap_ms, uint, 0644);
++static unsigned int tcon_vcom = 200;			/* -2.00 V, stock onyxconfig */
++module_param(tcon_vcom, uint, 0444);
++static bool refresh_enable = true;
++module_param(refresh_enable, bool, 0644);
++
++static struct palma2_tcon *palma2_ctx;			/* single panel; lets tcon_contrast apply live */
++static int palma2_tcon_i2c_write(struct palma2_tcon *ctx, u8 reg, u8 val);
++
++/* stock CMD_TCON_CONTRAST (ebc ioctl 0x7205); 32..128 look best on the Palma 2, 255 is darkest */
++static unsigned int tcon_contrast = 64;
++static int tcon_contrast_set(const char *val, const struct kernel_param *kp)
++{
++	struct palma2_tcon *ctx = READ_ONCE(palma2_ctx);
++	int ret = param_set_uint(val, kp);
++
++	if (ret || !ctx || !ctx->enabled)
++		return ret;
++	palma2_tcon_i2c_write(ctx, TCON_REG_CONTRAST, min(tcon_contrast, 255u));
++	palma2_tcon_i2c_write(ctx, TCON_REG_UI_MODE, TCON_MODE_GC16);	/* redraw with the new curve */
++	return 0;
++}
++static const struct kernel_param_ops tcon_contrast_ops = {
++	.set = tcon_contrast_set,
++	.get = param_get_uint,
++};
++module_param_cb(tcon_contrast, &tcon_contrast_ops, &tcon_contrast, 0644);
++
++/* write anything: full GC16 redraw now (stock "refresh screen") */
++static int refresh_now_set(const char *val, const struct kernel_param *kp)
++{
++	struct palma2_tcon *ctx = READ_ONCE(palma2_ctx);
++
++	if (!ctx || !ctx->enabled)
++		return -ENODEV;
++	/* a GC16 written while partial waveforms still run gets lost: let refresh_work wait for idle */
++	WRITE_ONCE(ctx->force_gc, true);
++	mod_delayed_work(system_wq, &ctx->refresh_work, 0);
++	return 0;
++}
++static const struct kernel_param_ops refresh_now_ops = { .set = refresh_now_set };
++module_param_cb(refresh_now, &refresh_now_ops, NULL, 0200);
++
++int msm_dpu_commit_notifier_register(struct notifier_block *nb);
++int msm_dpu_commit_notifier_unregister(struct notifier_block *nb);
++
++static int palma2_tcon_i2c_write(struct palma2_tcon *ctx, u8 reg, u8 val)
++{
++	u8 buf[2] = { reg, val };
++	int ret;
++
++	if (!ctx->tcon)
++		return -ENODEV;
++	ret = i2c_master_send(ctx->tcon, buf, 2);
++	return ret == 2 ? 0 : (ret < 0 ? ret : -EIO);
++}
++
++/* the TCON drops register writes for a while after power-up (VCOM read back 0xce after boot): write until it sticks */
++static void palma2_tcon_write_verify(struct palma2_tcon *ctx, u8 reg, u8 val)
++{
++	int i, got = -1;
++
++	for (i = 0; i < 20; i++) {
++		palma2_tcon_i2c_write(ctx, reg, val);
++		msleep(20);
++		got = i2c_smbus_read_byte_data(ctx->tcon, reg);
++		if (got == val)
++			break;
++		msleep(80);
++	}
++	if (got != val)
++		dev_warn(&ctx->dsi->dev, "TCON reg 0x%02x: wrote 0x%02x, reads 0x%02x\n", reg, val, got);
++	else if (i)
++		dev_info(&ctx->dsi->dev, "TCON reg 0x%02x stuck after %d retries\n", reg, i);
++}
++
++/* re-arm the idle GC16 check relative to the last big change: small commits (a blinking cursor) must not postpone it */
++static void palma2_tcon_arm_idle_gc(struct palma2_tcon *ctx)
++{
++	unsigned long due = ctx->last_big + msecs_to_jiffies(refresh_gc_idle_ms);
++
++	mod_delayed_work(system_wq, &ctx->refresh_work, time_after(due, jiffies) ? due - jiffies : 0);
++}
++
++static void palma2_tcon_refresh_work(struct work_struct *work)
++{
++	struct palma2_tcon *ctx = container_of(to_delayed_work(work), struct palma2_tcon, refresh_work);
++	unsigned long now = jiffies;
++	unsigned int mode;
++
++	if (!ctx->enabled || !refresh_enable)
++		return;
++	if (xchg(&ctx->force_gc, false)) {
++		unsigned long until = jiffies + msecs_to_jiffies(1500);
++
++		/* 0x20 PM_STATE / 0x21 WF_SEND_STATE: non-zero while waveforms run */
++		while (time_before(jiffies, until) &&
++		       (i2c_smbus_read_byte_data(ctx->tcon, 0x20) > 0 || i2c_smbus_read_byte_data(ctx->tcon, 0x21) > 0))
++			msleep(20);
++		palma2_tcon_i2c_write(ctx, TCON_REG_UI_MODE, TCON_MODE_GC16);
++		ctx->since_gc = 0;
++		ctx->fast_dirty = false;
++		ctx->last_cmd = jiffies;
++		if (READ_ONCE(ctx->pending))
++			mod_delayed_work(system_wq, &ctx->refresh_work, msecs_to_jiffies(refresh_min_gap_ms));
++		return;
++	}
++	if (!READ_ONCE(ctx->pending)) {
++		/* settle timer: redraw the 1-bit burst frames in grayscale */
++		if (ctx->fast_dirty) {
++			palma2_tcon_i2c_write(ctx, TCON_REG_UI_MODE, refresh_mode);
++			ctx->fast_dirty = false;
++			ctx->last_cmd = jiffies;
++			if (refresh_gc_min && ctx->since_gc >= refresh_gc_min * 10)
++				palma2_tcon_arm_idle_gc(ctx);
++			return;
++		}
++		/* idle timer: one GC16 cleans the ghosting left by a burst of partial updates */
++		if (refresh_gc_min && ctx->since_gc >= refresh_gc_min * 10) {
++			if (time_before(now, ctx->last_big + msecs_to_jiffies(refresh_gc_idle_ms))) {
++				palma2_tcon_arm_idle_gc(ctx);
++				return;
++			}
++			palma2_tcon_i2c_write(ctx, TCON_REG_UI_MODE, TCON_MODE_GC16);
++			ctx->since_gc = 0;
++			ctx->last_cmd = jiffies;
++		}
++		return;
++	}
++	if (time_before(now, ctx->last_cmd + msecs_to_jiffies(refresh_min_gap_ms))) {
++		mod_delayed_work(system_wq, &ctx->refresh_work, ctx->last_cmd + msecs_to_jiffies(refresh_min_gap_ms) - now);
++		return;
++	}
++	WRITE_ONCE(ctx->pending, false);	/* a commit arriving from here on re-arms the work */
++	mode = atomic_xchg(&ctx->dmg_pending, 0);
++	if (mode) {
++		ctx->since_gc += mode;
++		ctx->last_big = now;
++	}
++	if (refresh_gc_hard && ctx->since_gc >= refresh_gc_hard * 1000) {
++		mode = TCON_MODE_GC16;
++		ctx->since_gc = 0;
++	} else if (refresh_fast_mode && time_before(now, ctx->last_cmd + msecs_to_jiffies(refresh_burst_ms))) {
++		mode = refresh_fast_mode;
++	} else {
++		mode = refresh_mode;
++	}
++	palma2_tcon_i2c_write(ctx, TCON_REG_UI_MODE, mode);
++	ctx->last_cmd = jiffies;
++	ctx->fast_dirty = mode == refresh_fast_mode;
++	if (READ_ONCE(ctx->pending))	/* a commit raced in after pending was cleared: keep its schedule */
++		mod_delayed_work(system_wq, &ctx->refresh_work, msecs_to_jiffies(refresh_min_gap_ms));
++	else if (ctx->fast_dirty)
++		mod_delayed_work(system_wq, &ctx->refresh_work, msecs_to_jiffies(refresh_settle_ms));
++	else if (refresh_gc_min && ctx->since_gc >= refresh_gc_min * 10)
++		palma2_tcon_arm_idle_gc(ctx);
++}
++
++static int palma2_tcon_commit_notify(struct notifier_block *nb, unsigned long action, void *data)
++{
++	struct palma2_tcon *ctx = container_of(nb, struct palma2_tcon, commit_nb);
++
++	refresh_last_damage = (uintptr_t)data;	/* 1/1000 of the screen, from the DPU (patch 0013) */
++	/* small continuous animations (a marquee, a clock) stay local: REGAL cleans them, no full flash */
++	if (refresh_last_damage >= refresh_gc_small)
++		atomic_add(refresh_last_damage, &ctx->dmg_pending);
++	/* only the first commit of a run arms the work: re-arming on every commit starves the refresh while scrolling */
++	if (ctx->enabled && refresh_enable && !xchg(&ctx->pending, true))
++		mod_delayed_work(system_wq, &ctx->refresh_work, msecs_to_jiffies(refresh_debounce_ms));
++	return NOTIFY_OK;
++}
++
++static void palma2_tcon_init_work(struct work_struct *work)
++{
++	struct palma2_tcon *ctx = container_of(to_delayed_work(work), struct palma2_tcon, init_work);
++
++	/* stock lfe5u_i2c_probe: VCOM then UI_MODE_SET sync, then a full refresh */
++	palma2_tcon_write_verify(ctx, TCON_REG_VCOM, clamp(tcon_vcom, 50u, 305u) - 50);
++	palma2_tcon_write_verify(ctx, TCON_REG_CONTRAST, min(tcon_contrast, 255u));
++	palma2_tcon_i2c_write(ctx, TCON_REG_UI_MODE, TCON_MODE_SYNC);
++	msleep(50);
++	palma2_tcon_i2c_write(ctx, TCON_REG_UI_MODE, TCON_MODE_GC16);
++	ctx->last_cmd = jiffies;
++	ctx->since_gc = 0;
++	atomic_set(&ctx->dmg_pending, 0);
++	ctx->pending = false;
++	ctx->fast_dirty = false;
++	ctx->enabled = true;
++}
++
++static int palma2_tcon_setup_i2c(struct palma2_tcon *ctx)
++{
++	struct device *dev = &ctx->dsi->dev;
++	struct device_node *np;
++
++	/* the TCON control port is a driverless I2C client node (tcon@34 on i2c7) */
++	np = of_parse_phandle(dev->of_node, "onyx,tcon", 0);
++	if (!np)
++		return 0;
++	ctx->tcon = of_find_i2c_device_by_node(np);
++	of_node_put(np);
++	if (!ctx->tcon)
++		return -EPROBE_DEFER;
++	INIT_DELAYED_WORK(&ctx->refresh_work, palma2_tcon_refresh_work);
++	INIT_DELAYED_WORK(&ctx->init_work, palma2_tcon_init_work);
++	ctx->commit_nb.notifier_call = palma2_tcon_commit_notify;
++	msm_dpu_commit_notifier_register(&ctx->commit_nb);
++	WRITE_ONCE(palma2_ctx, ctx);
++	dev_info(dev, "TCON refresh trigger via %s\n", dev_name(&ctx->tcon->dev));
++	return 0;
++}
++
++
++/* hfp 40 / hsw 20 / hbp 40, vfp 10 / vsw 2 / vbp 6: 1748 x 842 x 60 Hz = 88.35 MHz */
++static const struct drm_display_mode palma2_tcon_mode = {
++	.clock = 88350,
++	.hdisplay = 1648,
++	.hsync_start = 1648 + 40,
++	.hsync_end = 1648 + 40 + 20,
++	.htotal = 1648 + 40 + 20 + 40,
++	.vdisplay = 824,
++	.vsync_start = 824 + 10,
++	.vsync_end = 824 + 10 + 2,
++	.vtotal = 824 + 10 + 2 + 6,
++	.width_mm = 139,
++	.height_mm = 70,
++	.type = DRM_MODE_TYPE_DRIVER | DRM_MODE_TYPE_PREFERRED,
++};
++
++static inline struct palma2_tcon *to_palma2_tcon(struct drm_panel *panel)
++{
++	return container_of(panel, struct palma2_tcon, panel);
++}
++
++/* lfe5u_config_done_wait(): 20 x 50 ms, DONE re-checked after 5 ms, then 100 ms settle */
++static int palma2_tcon_wait_done(struct palma2_tcon *ctx)
++{
++	int i;
++
++	for (i = 0; i < 20; i++) {
++		msleep(50);
++		if (!gpiod_get_value_cansleep(ctx->done))
++			continue;
++		usleep_range(5000, 6000);
++		if (gpiod_get_value_cansleep(ctx->done)) {
++			msleep(100);
++			return 0;
++		}
++	}
++	return -ETIMEDOUT;
++}
++
++/* lfe5u_power_ctrl(1) with the rails/pins present in the Palma 2 DT, then DONE wait */
++static int palma2_tcon_fpga_power_on(struct palma2_tcon *ctx)
++{
++	int ret, try;
++
++	ret = regulator_enable(ctx->vdd1v8);
++	if (ret)
++		return ret;
++
++	if (!ctx->fpga_reset)		/* sequencing left to user space */
++		return regulator_enable(ctx->vdd1v2);
++
++	usleep_range(1000, 1500);
++	gpiod_set_value_cansleep(ctx->fpga_reset, 1);	/* RESET held low while rails ramp */
++	gpiod_set_value_cansleep(ctx->programn, 0);	/* PROGRAMN high: self-configure */
++	gpiod_set_value_cansleep(ctx->standby, 0);	/* STANDBY high */
++	gpiod_set_value_cansleep(ctx->pwr_30v, 1);
++	usleep_range(2000, 2500);			/* 1 ms + 1 ms (no 2.5 V rail here) */
++	gpiod_set_value_cansleep(ctx->pwr_12v_core, 1);
++	usleep_range(1000, 1500);
++	ret = regulator_enable(ctx->vdd1v2);
++	if (ret)
++		goto err_1v8;
++	usleep_range(3000, 3500);
++	gpiod_set_value_cansleep(ctx->fpga_reset, 0);
++	usleep_range(3000, 3500);
++	msleep(100);			/* lfe5u_probe: 100 ms before polling DONE */
++
++	/* lfe5u_load_fw(): on timeout pulse PROGRAMN low 50 ms to force a reload, 2 retries */
++	for (try = 0; ; try++) {
++		ret = palma2_tcon_wait_done(ctx);
++		if (!ret || try == 2)
++			return ret;
++		dev_warn(ctx->panel.dev, "FPGA DONE timeout, pulsing PROGRAMN (try %d)\n", try);
++		gpiod_set_value_cansleep(ctx->programn, 1);
++		msleep(50);
++		gpiod_set_value_cansleep(ctx->programn, 0);
++	}
++
++err_1v8:
++	regulator_disable(ctx->vdd1v8);
++	return ret;
++}
++
++/* lfe5u_power_ctrl(0): RESET low, rails down 1 ms apart in reverse order, STANDBY/PROGRAMN low */
++static void palma2_tcon_fpga_power_off(struct palma2_tcon *ctx)
++{
++	if (ctx->fpga_reset) {
++		gpiod_set_value_cansleep(ctx->fpga_reset, 1);
++		usleep_range(1000, 1500);
++		gpiod_set_value_cansleep(ctx->pwr_30v, 0);
++		usleep_range(2000, 2500);
++	}
++	regulator_disable(ctx->vdd1v2);
++	if (ctx->fpga_reset) {
++		usleep_range(1000, 1500);
++		gpiod_set_value_cansleep(ctx->pwr_12v_core, 0);
++		usleep_range(1000, 1500);
++		gpiod_set_value_cansleep(ctx->standby, 1);
++		gpiod_set_value_cansleep(ctx->programn, 1);
++	}
++	regulator_disable(ctx->vdd1v8);
++}
++
++static int palma2_tcon_prepare(struct drm_panel *panel)
++{
++	struct palma2_tcon *ctx = to_palma2_tcon(panel);
++	struct mipi_dsi_multi_context dsi_ctx = { .dsi = ctx->dsi };
++
++	/* stock qcom,mdss-dsi-reset-sequence = <1 10 0 10 1 10> (raw levels, ms) */
++	gpiod_set_value_cansleep(ctx->reset, 0);
++	usleep_range(10000, 11000);
++	gpiod_set_value_cansleep(ctx->reset, 1);
++	usleep_range(10000, 11000);
++	gpiod_set_value_cansleep(ctx->reset, 0);
++	usleep_range(10000, 11000);
++
++	/*
++	 * Bootloader (DisplayDxe Panel_tcon_vid.xml) init sequence. The stock
++	 * kernel never sends its own on-command (continuous splash), so this is
++	 * the only DCS traffic the TCON has ever seen: FE 00, C2 08, 35 00,
++	 * 51 FF, exit_sleep, 150 ms, display_on, 50 ms.
++	 */
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xfe, 0x00);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xc2, 0x08);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x35, 0x00);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x51, 0xff);
++	mipi_dsi_dcs_exit_sleep_mode_multi(&dsi_ctx);
++	mipi_dsi_msleep(&dsi_ctx, 150);
++	mipi_dsi_dcs_set_display_on_multi(&dsi_ctx);
++	mipi_dsi_msleep(&dsi_ctx, 50);
++
++	if (ctx->tcon && !dsi_ctx.accum_err)
++		mod_delayed_work(system_wq, &ctx->init_work, msecs_to_jiffies(600));
++
++	return dsi_ctx.accum_err;
++}
++
++static int palma2_tcon_unprepare(struct drm_panel *panel)
++{
++	struct palma2_tcon *ctx = to_palma2_tcon(panel);
++	struct mipi_dsi_multi_context dsi_ctx = { .dsi = ctx->dsi };
++
++	/* bootloader term sequence: display_off, 50 ms, enter_sleep, 150 ms */
++	if (ctx->tcon) {
++		ctx->enabled = false;
++		cancel_delayed_work_sync(&ctx->init_work);
++		cancel_delayed_work_sync(&ctx->refresh_work);
++	}
++
++	mipi_dsi_dcs_set_display_off_multi(&dsi_ctx);
++	mipi_dsi_msleep(&dsi_ctx, 50);
++	mipi_dsi_dcs_enter_sleep_mode_multi(&dsi_ctx);
++	mipi_dsi_msleep(&dsi_ctx, 150);
++	gpiod_set_value_cansleep(ctx->reset, 1);
++
++	return dsi_ctx.accum_err;
++}
++
++static int palma2_tcon_get_modes(struct drm_panel *panel,
++				 struct drm_connector *connector)
++{
++	return drm_connector_helper_get_modes_fixed(connector, &palma2_tcon_mode);
++}
++
++static enum drm_panel_orientation palma2_tcon_get_orientation(struct drm_panel *panel)
++{
++	return orientation;
++}
++
++static const struct drm_panel_funcs palma2_tcon_funcs = {
++	.get_orientation = palma2_tcon_get_orientation,
++	.prepare = palma2_tcon_prepare,
++	.unprepare = palma2_tcon_unprepare,
++	.get_modes = palma2_tcon_get_modes,
++};
++
++static int palma2_tcon_get_gpio(struct device *dev, const char *con,
++				enum gpiod_flags flags, struct gpio_desc **out)
++{
++	*out = devm_gpiod_get(dev, con, flags);
++	if (IS_ERR(*out))
++		return dev_err_probe(dev, PTR_ERR(*out), "%s gpio\n", con);
++	return 0;
++}
++
++static int palma2_tcon_probe(struct mipi_dsi_device *dsi)
++{
++	struct device *dev = &dsi->dev;
++	struct palma2_tcon *ctx;
++	int ret;
++
++	ctx = devm_drm_panel_alloc(dev, struct palma2_tcon, panel,
++				   &palma2_tcon_funcs, DRM_MODE_CONNECTOR_DSI);
++	if (IS_ERR(ctx))
++		return PTR_ERR(ctx);
++
++	ctx->dsi = dsi;
++	mipi_dsi_set_drvdata(dsi, ctx);
++
++	ctx->vdd1v8 = devm_regulator_get(dev, "vdd1v8");
++	if (IS_ERR(ctx->vdd1v8))
++		return dev_err_probe(dev, PTR_ERR(ctx->vdd1v8), "vdd1v8\n");
++	ctx->vdd1v2 = devm_regulator_get(dev, "vdd1v2");
++	if (IS_ERR(ctx->vdd1v2))
++		return dev_err_probe(dev, PTR_ERR(ctx->vdd1v2), "vdd1v2\n");
++	/* stock lfcpnx@0: vdd1v8_uV = 1800000, vdd1v2_uV = 1200000 */
++	ret = regulator_set_voltage(ctx->vdd1v8, 1800000, 1800000) ?:
++	      regulator_set_voltage(ctx->vdd1v2, 1200000, 1200000);
++	if (ret)
++		return dev_err_probe(dev, ret, "FPGA rail voltage\n");
++
++	/* asserted (low) until prepare(), like the stock disp_pins_default output-low */
++	ret = palma2_tcon_get_gpio(dev, "reset", GPIOD_OUT_HIGH, &ctx->reset);
++	if (ret)
++		return ret;
++
++	ctx->fpga_reset = devm_gpiod_get_optional(dev, "fpga-reset", GPIOD_OUT_HIGH);
++	if (IS_ERR(ctx->fpga_reset))
++		return dev_err_probe(dev, PTR_ERR(ctx->fpga_reset), "fpga-reset gpio\n");
++	if (ctx->fpga_reset) {
++		ret = palma2_tcon_get_gpio(dev, "fpga-program", GPIOD_OUT_LOW, &ctx->programn) ?:
++		      palma2_tcon_get_gpio(dev, "fpga-standby", GPIOD_OUT_LOW, &ctx->standby) ?:
++		      palma2_tcon_get_gpio(dev, "fpga-30v-enable", GPIOD_OUT_LOW, &ctx->pwr_30v) ?:
++		      palma2_tcon_get_gpio(dev, "fpga-12v-core-enable", GPIOD_OUT_LOW,
++					   &ctx->pwr_12v_core) ?:
++		      palma2_tcon_get_gpio(dev, "fpga-done", GPIOD_IN, &ctx->done);
++		if (ret)
++			return ret;
++	}
++
++	/* like the stock driver: FPGA is brought up once at probe and stays up */
++	ret = palma2_tcon_fpga_power_on(ctx);
++	if (ret == -ETIMEDOUT)
++		dev_err(dev, "FPGA never asserted DONE, continuing blind\n");
++	else if (ret)
++		return dev_err_probe(dev, ret, "FPGA power-up\n");
++
++	ctx->panel.prepare_prev_first = true;
++	ret = palma2_tcon_setup_i2c(ctx);
++	if (ret) {
++		palma2_tcon_fpga_power_off(ctx);
++		return dev_err_probe(dev, ret, "TCON i2c\n");
++	}
++
++	drm_panel_add(&ctx->panel);
++
++	/*
++	 * stock: 4 lanes, RGB888, non_burst_sync_event, h-sync-pulse 0, EOT appended,
++	 * BLLP/EOF-BLLP power stop (msm host always sets those), no forced HS clock.
++	 */
++	dsi->lanes = dsi_lanes_override ? dsi_lanes_override : 4;
++	dsi->format = MIPI_DSI_FMT_RGB888;
++	dsi->mode_flags = dsi_flags_override ? dsi_flags_override :
++			  (MIPI_DSI_MODE_VIDEO | MIPI_DSI_CLOCK_NON_CONTINUOUS);
++
++	ret = mipi_dsi_attach(dsi);
++	if (ret < 0) {
++		drm_panel_remove(&ctx->panel);
++		palma2_tcon_fpga_power_off(ctx);
++		return dev_err_probe(dev, ret, "dsi attach\n");
++	}
++
++	return 0;
++}
++
++static void palma2_tcon_remove(struct mipi_dsi_device *dsi)
++{
++	struct palma2_tcon *ctx = mipi_dsi_get_drvdata(dsi);
++
++	mipi_dsi_detach(dsi);
++	drm_panel_remove(&ctx->panel);
++	if (ctx->tcon) {
++		WRITE_ONCE(palma2_ctx, NULL);
++		msm_dpu_commit_notifier_unregister(&ctx->commit_nb);
++		cancel_delayed_work_sync(&ctx->init_work);
++		cancel_delayed_work_sync(&ctx->refresh_work);
++		put_device(&ctx->tcon->dev);
++	}
++	palma2_tcon_fpga_power_off(ctx);
++}
++
++static const struct of_device_id palma2_tcon_of_match[] = {
++	{ .compatible = "onyx,palma2-tcon-panel" },
++	{ /* sentinel */ }
++};
++MODULE_DEVICE_TABLE(of, palma2_tcon_of_match);
++
++static struct mipi_dsi_driver palma2_tcon_driver = {
++	.driver = {
++		.name = "panel-onyx-palma2-tcon",
++		.of_match_table = palma2_tcon_of_match,
++	},
++	.probe = palma2_tcon_probe,
++	.remove = palma2_tcon_remove,
++};
++module_mipi_dsi_driver(palma2_tcon_driver);
++
++MODULE_DESCRIPTION("Onyx Boox Palma 2 e-ink TCON DSI panel driver");
++MODULE_LICENSE("GPL");

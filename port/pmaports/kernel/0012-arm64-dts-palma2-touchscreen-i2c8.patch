@@ -1,0 +1,628 @@
+--- a/arch/arm64/boot/dts/qcom/sm6350-onyx-palma2.dts
++++ b/arch/arm64/boot/dts/qcom/sm6350-onyx-palma2.dts
+@@ -15,10 +15,14 @@
+ /* PMK8350 is configured to use SID6 instead of 0 */
+ #define PMK8350_SID 6
+ 
++#include <dt-bindings/firmware/qcom,scm.h>
+ #include <dt-bindings/gpio/gpio.h>
+ #include <dt-bindings/input/input.h>
+ #include <dt-bindings/pinctrl/qcom,pmic-gpio.h>
+ #include <dt-bindings/regulator/qcom,rpmh-regulator.h>
++#include <dt-bindings/sound/qcom,q6afe.h>
++#include <dt-bindings/sound/qcom,q6asm.h>
++#include <dt-bindings/interrupt-controller/arm-gic.h>
+ #include "sm6350.dtsi"
+ #include "pm6150l.dtsi"
+ #include "pm6350.dtsi"
+@@ -38,14 +42,176 @@
+ 		serial0 = &uart9;
+ 	};
+ 
++	battery: battery {
++		compatible = "simple-battery";
++		device-chemistry = "lithium-ion-polymer";
++		/* stock qcom,battery-data: 7381805_Onyx_Note6_3950mAh_PM7250B, max 4.45 V, fastchg 2000 mA */
++		charge-full-design-microamp-hours = <3950000>;
++		/* conservative: the mainline smb2 driver has no thermal handling (fairphone-fp4 uses 1.5 A); first bring-up at 1 A */
++		constant-charge-current-max-microamp = <1000000>;
++		voltage-max-design-microvolt = <4400000>;
++		voltage-min-design-microvolt = <3400000>;
++	};
++
++	bat_therm_sensor: thermal-sensor-bat-therm {
++		compatible = "generic-adc-thermal";
++		#thermal-sensor-cells = <0>;
++		#io-channel-cells = <0>;
++		io-channels = <&pm7250b_adc ADC5_BAT_THERM_100K_PU>;
++		io-channel-names = "sensor-channel";
++		/*
++		 * Voltage to temperature for the stock 100 kOhm NTC (B=4250 assumed) with a
++		 * 100 kOhm pull-up and 1.875 V reference; 937 mV measured at room temperature.
++		 */
++		temperature-lookup-table = <
++			(-40000) 1840
++			(-38000) 1835
++			(-36000) 1828
++			(-34000) 1821
++			(-32000) 1813
++			(-30000) 1803
++			(-28000) 1793
++			(-26000) 1781
++			(-24000) 1768
++			(-22000) 1753
++			(-20000) 1737
++			(-18000) 1719
++			(-16000) 1700
++			(-14000) 1679
++			(-12000) 1655
++			(-10000) 1630
++			(-8000) 1603
++			(-6000) 1574
++			(-4000) 1543
++			(-2000) 1510
++			0 1475
++			2000 1438
++			4000 1400
++			6000 1360
++			8000 1318
++			10000 1276
++			12000 1232
++			14000 1187
++			16000 1142
++			18000 1097
++			20000 1051
++			22000 1005
++			24000 960
++			26000 915
++			28000 871
++			30000 828
++			32000 786
++			34000 745
++			36000 705
++			38000 666
++			40000 629
++			42000 594
++			44000 560
++			46000 527
++			48000 497
++			50000 467
++			52000 439
++			54000 413
++			56000 388
++			58000 365
++			60000 343
++			62000 322
++			64000 302
++			66000 284
++			68000 267
++			70000 251
++			72000 235
++			74000 221
++			76000 208
++			78000 195
++			80000 184
++			82000 173
++			84000 163
++			86000 153
++			88000 144
++			90000 136
++			92000 128
++			94000 120
++			96000 114
++			98000 107>;
++	};
++
++	thermal-zones {
++		battery-thermal {
++			polling-delay-passive = <0>;
++			polling-delay = <5000>;
++			thermal-sensors = <&bat_therm_sensor>;
++
++			trips {
++				/* last-resort guard until the charger driver does JEITA itself */
++				battery-crit {
++					temperature = <60000>;
++					hysteresis = <0>;
++					type = "critical";
++				};
++			};
++		};
++	};
++
++	reserved-memory {
++		/* stock allocates rmtfs (0x280000) dynamically; same placement as sm6350-sony-xperia-lena-pdx213 */
++		rmtfs@fe901000 {
++			compatible = "qcom,rmtfs-mem";
++			reg = <0x0 0xfe901000 0x0 0x280000>;
++			no-map;
++
++			qcom,client-id = <1>;
++			qcom,vmid = <QCOM_SCM_VMID_MSS_MSA>;
++		};
++	};
++
+ 	chosen {
+ 		stdout-path = "serial0:115200n8";
+ 	};
+ 
++	tp_vdd_en: regulator-tp-vdd {
++		compatible = "regulator-fixed";
++		regulator-name = "tp_vdd_en";
++		gpio = <&tlmm 88 GPIO_ACTIVE_HIGH>;
++		enable-active-high;
++		vin-supply = <&vreg_l5a>;
++		/* edt-ft5x06 probe fails (I2C NAK) when it powers the FT5436 up itself; stock keeps it on */
++		regulator-always-on;
++		regulator-boot-on;
++	};
++
++	tp_vcc_en: regulator-tp-vcc {
++		compatible = "regulator-fixed";
++		regulator-name = "tp_vcc_en";
++		gpio = <&tlmm 89 GPIO_ACTIVE_HIGH>;
++		enable-active-high;
++		vin-supply = <&vreg_l6a>;
++		regulator-always-on;
++		regulator-boot-on;
++	};
++
++	wcd937x: audio-codec {
++		compatible = "qcom,wcd9370-codec";
++		pinctrl-names = "default";
++		pinctrl-0 = <&wcd_reset_n>;
++		reset-gpios = <&tlmm 83 GPIO_ACTIVE_LOW>;
++		vdd-buck-supply = <&vreg_l13a>;
++		vdd-rxtx-supply = <&vreg_l10e>;
++		vdd-px-supply = <&vreg_l10e>;
++		vdd-mic-bias-supply = <&vreg_bob>;
++		qcom,micbias1-microvolt = <1800000>;
++		qcom,micbias2-microvolt = <1800000>;
++		qcom,micbias3-microvolt = <1800000>;
++		qcom,micbias4-microvolt = <1800000>;
++		qcom,rx-device = <&wcd937x_rx>;
++		qcom,tx-device = <&wcd937x_tx>;
++		#sound-dai-cells = <1>;
++	};
++
+ 	gpio-keys {
+ 		compatible = "gpio-keys";
+ 		pinctrl-names = "default";
+-		pinctrl-0 = <&gpio_keys_pin>;
++		pinctrl-0 = <&gpio_keys_pin>, <&smart_key_pin>;
+ 
+ 		key-volume-up {
+ 			label = "volume_up";
+@@ -109,8 +275,9 @@
+ 
+ 		vreg_l6a: ldo6 {
+ 			regulator-name = "vreg_l6a";
+-			regulator-min-microvolt = <1710000>;
+-			regulator-max-microvolt = <3544000>;
++			/* touch controller VCC (FocalTech FT5436 needs 2.8-3.3 V; stock boots at 1.71 V and the vendor driver raises it) */
++			regulator-min-microvolt = <2800000>;
++			regulator-max-microvolt = <2800000>;
+ 			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+ 		};
+ 
+@@ -304,6 +471,8 @@
+ 			regulator-min-microvolt = <3000000>;
+ 			regulator-max-microvolt = <3401000>;
+ 			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
++			/* stock: WCN3990 vdd-3.3-ch1, hall sensor, touch vcc; touch does not answer I2C without it */
++			regulator-always-on;
+ 		};
+ 
+ 		vreg_bob: bob {
+@@ -316,10 +485,335 @@
+ 	};
+ };
+ 
++&gpi_dma0 {
++	status = "okay";
++};
++
+ &gpi_dma1 {
++	status = "okay";
++};
++
++/*
++ * Touch controller on QUP SE8. Stock DT lists three alternatives on this bus
++ * (focaltech,onyx_fts @0x08 chip 0x5436, istaric,IS56XX @0x55, cyttsp6 @0x25);
++ * all share IRQ gpio22, reset gpio21, power enables gpio88/89, L5A/L6A.
++ */
++&i2c8 {
++	status = "okay";
++
++	touchscreen@8 {
++		compatible = "focaltech,ft5426";
++		reg = <0x8>;
++		interrupts-extended = <&tlmm 22 IRQ_TYPE_EDGE_FALLING>;
++		reset-gpios = <&tlmm 21 GPIO_ACTIVE_LOW>;
++		vcc-supply = <&tp_vcc_en>;
++		iovcc-supply = <&tp_vdd_en>;
++		pinctrl-names = "default";
++		pinctrl-0 = <&tp_pins>;
++		touchscreen-size-x = <824>;
++		touchscreen-size-y = <1648>;
++	};
++};
++
++&pm7250b_charger {
++	monitored-battery = <&battery>;
++	/* batt_therm feeds the software JEITA in qcom_smbx (patch 0014) */
++	io-channels = <&pm7250b_adc ADC5_USB_IN_I>,
++		      <&pm7250b_adc ADC5_USB_IN_V_16>,
++		      <&bat_therm_sensor>;
++	io-channel-names = "usbin_i",
++			   "usbin_v",
++			   "batt_therm";
+ 	status = "okay";
+ };
+ 
++&pm7250b_qgauge {
++	monitored-battery = <&battery>;
++	/* charge status comes from the charger (patch 0015) */
++	power-supplies = <&pm7250b_charger>;
++	/* stock qcom,qpnp-qg: batt-therm = ADC 0x4a (100K pull-up NTC, converted by bat_therm_sensor), batt-id = 0x4b */
++	io-channels = <&bat_therm_sensor>,
++		      <&pm7250b_adc ADC5_BAT_ID_100K_PU>;
++	status = "okay";
++};
++
++/*
++ * Audio (stock lagoon "bolero" + WCD937x): q6afe CODEC_DMA -> rx-macro -> SoundWire RX ->
++ * WCD937x AUX -> FSA2275 (gpio90 low = speaker, gpio47 low = unmuted) -> AW87390 @0x58 -> speaker.
++ * Macro/SoundWire layout after sm8250 + kodiak; port params from kodiak swr0/swr1.
++ */
++&soc {
++	rxmacro: codec@3200000 {
++		compatible = "qcom,sm8250-lpass-rx-macro";
++		reg = <0 0x03200000 0 0x1000>;
++		pinctrl-names = "default";
++		pinctrl-0 = <&rx_swr_active>;
++		clocks = <&q6afecc LPASS_CLK_ID_TX_CORE_MCLK LPASS_CLK_ATTRIBUTE_COUPLE_NO>,
++			 <&q6afecc LPASS_CLK_ID_TX_CORE_NPL_MCLK LPASS_CLK_ATTRIBUTE_COUPLE_NO>,
++			 <&q6afecc LPASS_HW_MACRO_VOTE LPASS_CLK_ATTRIBUTE_COUPLE_NO>,
++			 <&q6afecc LPASS_HW_DCODEC_VOTE LPASS_CLK_ATTRIBUTE_COUPLE_NO>,
++			 <&vamacro>;
++		clock-names = "mclk", "npl", "macro", "dcodec", "fsgen";
++		#clock-cells = <0>;
++		clock-output-names = "mclk";
++		#sound-dai-cells = <1>;
++	};
++
++	swr_rx: soundwire@3210000 {
++		compatible = "qcom,soundwire-v1.5.1";
++		reg = <0 0x03210000 0 0x2000>;
++		interrupts = <GIC_SPI 297 IRQ_TYPE_LEVEL_HIGH>;
++		clocks = <&rxmacro>;
++		clock-names = "iface";
++		label = "RX";
++		qcom,din-ports = <0>;
++		qcom,dout-ports = <5>;
++		qcom,ports-word-length =	/bits/ 8 <0x01 0x07 0x04 0xff 0xff>;
++		qcom,ports-sinterval-low =	/bits/ 8 <0x03 0x3f 0x1f 0x03 0x03>;
++		qcom,ports-offset1 =		/bits/ 8 <0x00 0x00 0x0b 0x01 0x01>;
++		qcom,ports-offset2 =		/bits/ 8 <0x00 0x00 0x0b 0x00 0x00>;
++		qcom,ports-lane-control =	/bits/ 8 <0x01 0x00 0x00 0x00 0x00>;
++		qcom,ports-block-pack-mode =	/bits/ 8 <0xff 0x00 0x01 0xff 0xff>;
++		qcom,ports-hstart =		/bits/ 8 <0xff 0x03 0xff 0xff 0xff>;
++		qcom,ports-hstop =		/bits/ 8 <0xff 0x06 0xff 0xff 0xff>;
++		qcom,ports-block-group-count =	/bits/ 8 <0xff 0xff 0xff 0xff 0x00>;
++		#sound-dai-cells = <1>;
++		#address-cells = <2>;
++		#size-cells = <0>;
++
++		wcd937x_rx: codec@0,4 {
++			compatible = "sdw20217010a00";
++			reg = <0 4>;
++			qcom,rx-port-mapping = <1 2 3 4 5>;
++			qcom,rx-channel-mapping = /bits/ 8 <1 2 1 1 2 1 1 2>;
++		};
++	};
++
++	txmacro: codec@3220000 {
++		compatible = "qcom,sm8250-lpass-tx-macro";
++		reg = <0 0x03220000 0 0x1000>;
++		pinctrl-names = "default";
++		pinctrl-0 = <&tx_swr_active>;
++		clocks = <&q6afecc LPASS_CLK_ID_TX_CORE_MCLK LPASS_CLK_ATTRIBUTE_COUPLE_NO>,
++			 <&q6afecc LPASS_CLK_ID_TX_CORE_NPL_MCLK LPASS_CLK_ATTRIBUTE_COUPLE_NO>,
++			 <&q6afecc LPASS_HW_MACRO_VOTE LPASS_CLK_ATTRIBUTE_COUPLE_NO>,
++			 <&q6afecc LPASS_HW_DCODEC_VOTE LPASS_CLK_ATTRIBUTE_COUPLE_NO>,
++			 <&vamacro>;
++		clock-names = "mclk", "npl", "macro", "dcodec", "fsgen";
++		#clock-cells = <0>;
++		clock-output-names = "mclk";
++		#sound-dai-cells = <1>;
++	};
++
++	swr_tx: soundwire@3230000 {
++		compatible = "qcom,soundwire-v1.5.1";
++		reg = <0 0x03230000 0 0x2000>;
++		interrupts = <GIC_SPI 296 IRQ_TYPE_LEVEL_HIGH>;
++		interrupt-names = "core";
++		clocks = <&txmacro>;
++		clock-names = "iface";
++		label = "TX";
++		qcom,din-ports = <3>;
++		qcom,dout-ports = <0>;
++		qcom,ports-sinterval-low =	/bits/ 8 <0x01 0x03 0x03>;
++		qcom,ports-offset1 =		/bits/ 8 <0x01 0x00 0x02>;
++		qcom,ports-offset2 =		/bits/ 8 <0x00 0x00 0x00>;
++		qcom,ports-hstart =		/bits/ 8 <0xff 0xff 0xff>;
++		qcom,ports-hstop =		/bits/ 8 <0xff 0xff 0xff>;
++		qcom,ports-word-length =	/bits/ 8 <0xff 0x00 0xff>;
++		qcom,ports-block-pack-mode =	/bits/ 8 <0xff 0xff 0xff>;
++		qcom,ports-block-group-count =	/bits/ 8 <0xff 0xff 0xff>;
++		qcom,ports-lane-control =	/bits/ 8 <0x00 0x01 0x00>;
++		#sound-dai-cells = <1>;
++		#address-cells = <2>;
++		#size-cells = <0>;
++
++		wcd937x_tx: codec@0,3 {
++			compatible = "sdw20217010a00";
++			reg = <0 3>;
++			qcom,tx-port-mapping = <1 1 2 3>;
++			qcom,tx-channel-mapping = /bits/ 8 <1 2 1 1 2 3 3 4 1 2 3 4>;
++		};
++	};
++
++	vamacro: codec@3370000 {
++		/* lagoon bolero 1.x has no CORE_ID registers (sc7280 data reads v0.0.0 and bails): sm8250 data = fixed v1.0 */
++		compatible = "qcom,sm8250-lpass-va-macro";
++		reg = <0 0x03370000 0 0x1000>;
++		clocks = <&q6afecc LPASS_CLK_ID_TX_CORE_MCLK LPASS_CLK_ATTRIBUTE_COUPLE_NO>,
++			 <&q6afecc LPASS_HW_MACRO_VOTE LPASS_CLK_ATTRIBUTE_COUPLE_NO>,
++			 <&q6afecc LPASS_HW_DCODEC_VOTE LPASS_CLK_ATTRIBUTE_COUPLE_NO>;
++		clock-names = "mclk", "macro", "dcodec";
++		#clock-cells = <0>;
++		clock-output-names = "fsgen";
++		#sound-dai-cells = <1>;
++	};
++};
++
++&lpass_tlmm {
++	rx_swr_active: rx-swr-active-state {
++		clk-pins {
++			pins = "gpio3";
++			function = "swr_rx_clk";
++			drive-strength = <2>;
++			slew-rate = <1>;
++			bias-disable;
++		};
++		data-pins {
++			pins = "gpio4", "gpio5";
++			function = "swr_rx_data";
++			drive-strength = <2>;
++			slew-rate = <1>;
++			bias-bus-hold;
++		};
++	};
++
++	tx_swr_active: tx-swr-active-state {
++		clk-pins {
++			pins = "gpio0";
++			function = "swr_tx_clk";
++			drive-strength = <2>;
++			slew-rate = <1>;
++			bias-disable;
++		};
++		data-pins {
++			pins = "gpio1", "gpio2", "gpio14";
++			function = "swr_tx_data";
++			drive-strength = <2>;
++			slew-rate = <1>;
++			bias-bus-hold;
++		};
++	};
++};
++
++&q6asmdai {
++	dai@0 {
++		reg = <MSM_FRONTEND_DAI_MULTIMEDIA1>;
++	};
++	dai@1 {
++		reg = <MSM_FRONTEND_DAI_MULTIMEDIA2>;
++	};
++};
++
++&sound {
++	compatible = "qcom,sm8250-sndcard";
++	model = "Onyx Palma 2";
++	aux-devs = <&speaker_amp>;
++	audio-routing = "Speaker IN", "AUX",
++			"Speaker", "Speaker OUT";
++
++	mm1-dai-link {
++		link-name = "MultiMedia1";
++		cpu {
++			sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA1>;
++		};
++	};
++
++	mm2-dai-link {
++		link-name = "MultiMedia2";
++		cpu {
++			sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA2>;
++		};
++	};
++
++	wcd-playback-dai-link {
++		link-name = "WCD Playback";
++		cpu {
++			sound-dai = <&q6afedai RX_CODEC_DMA_RX_0>;
++		};
++		codec {
++			sound-dai = <&wcd937x 0>, <&swr_rx 0>, <&rxmacro 0>;
++		};
++		platform {
++			sound-dai = <&q6routing>;
++		};
++	};
++
++	wcd-capture-dai-link {
++		link-name = "WCD Capture";
++		cpu {
++			sound-dai = <&q6afedai TX_CODEC_DMA_TX_3>;
++		};
++		codec {
++			sound-dai = <&wcd937x 1>, <&swr_tx 0>, <&txmacro 0>;
++		};
++		platform {
++			sound-dai = <&q6routing>;
++		};
++	};
++};
++
++&pm6350_resin {
++	/* the volume-down key is the PMIC RESIN input */
++	linux,code = <KEY_VOLUMEDOWN>;
++	status = "okay";
++};
++
++&adsp {
++	/* stock modem_a:/image adsp.mdt + bNN; adspr/adsps/adspua.jsn next to it for pd-mapper (audio + sensors PDs) */
++	firmware-name = "qcom/sm6350/onyx/palma2/adsp.mdt";
++	status = "okay";
++};
++
++&mpss {
++	/* stock modem_a:/image, split .mdt + .bNN, wlanmdsp.mbn served by tqftpserv */
++	firmware-name = "qcom/sm6350/onyx/palma2/modem.mdt";
++	status = "okay";
++};
++
++&wifi {
++	/* WCN3990, supplies as stock qcom,icnss (same as fairphone-fp4) */
++	vdd-0.8-cx-mx-supply = <&vreg_l4a>;
++	vdd-1.8-xo-supply = <&vreg_l7a>;
++	vdd-1.3-rfa-supply = <&vreg_l2e>;
++	vdd-3.3-ch0-supply = <&vreg_l10e>;
++	vdd-3.3-ch1-supply = <&vreg_l11e>;
++	status = "okay";
++};
++
++&gpu {
++	status = "okay";
++};
++
++&gpu_zap_shader {
++	/* stock vendor/firmware a615_zap (split .mdt); a619_gmu.bin + a630_sqe.fw in /lib/firmware/qcom */
++	firmware-name = "qcom/sm6350/onyx/palma2/a615_zap.mdt";
++};
++
++&i2c0 {
++	status = "okay";
++
++	/* stock haptic_hv: AWINIC AW86938 LRA driver, irq gpio55, reset gpio70 (powered from onyx-vsys) */
++	haptics@5a {
++		compatible = "awinic,aw86938", "awinic,aw86927";
++		reg = <0x5a>;
++		interrupts-extended = <&tlmm 55 IRQ_TYPE_EDGE_FALLING>;
++		reset-gpios = <&tlmm 70 GPIO_ACTIVE_LOW>;
++	};
++};
++
++&i2c10 {
++	status = "okay";
++
++	/* stock aw87xxx_pa (real address 0x58); the second PA at 0x59 fails on stock too */
++	speaker_amp: audio-codec@58 {
++		compatible = "awinic,aw87390";
++		reg = <0x58>;
++		#sound-dai-cells = <0>;
++		sound-name-prefix = "Speaker";
++	};
++
++	/*
++	 * TI LM3630A front light (stock onyx,lm3630a_v2: two banks = brightness + colour
++	 * temperature, full-scale current code 0x0a). No kernel driver on purpose: mainline
++	 * lm3630a_bl programs 0x1f (~28 mA) full scale; tools/palma_frontlight.py drives it.
++	 */
++	frontlight@38 {
++		compatible = "ti,lm3630a-onyx";
++		reg = <0x38>;
++	};
++};
++
+ &i2c7 {
+ 	status = "okay";
+ 
+@@ -327,7 +821,7 @@
+ 	 * Lattice CertusPro-NX TCON control port (stock onyx,lfe5u_i2c). Deliberately no
+ 	 * kernel driver: user space talks to it via /dev/i2c-N (tools/palma_epd_test.py).
+ 	 */
+-	tcon@34 {
++	tcon_i2c: tcon@34 {
+ 		compatible = "onyx,lfe5u-tcon";
+ 		reg = <0x34>;
+ 	};
+@@ -344,6 +838,7 @@
+ 	panel@0 {
+ 		compatible = "onyx,palma2-tcon-panel";
+ 		reg = <0>;
++		onyx,tcon = <&tcon_i2c>;
+ 
+ 		pinctrl-names = "default";
+ 		pinctrl-0 = <&fpga_tcon_default>;
+@@ -439,6 +934,58 @@
+ 		drive-strength = <2>;
+ 		bias-disable;
+ 	};
++
++	/* stock "onyx-vsys" fixed regulator (lm3630a-vdd-supply): the front light does not answer I2C without it */
++	onyx-vsys-hog {
++		gpio-hog;
++		gpios = <33 GPIO_ACTIVE_HIGH>;
++		output-high;
++		line-name = "onyx-vsys";
++	};
++
++	frontlight-en-hog {
++		gpio-hog;
++		gpios = <73 GPIO_ACTIVE_HIGH>;
++		output-high;
++		line-name = "frontlight-en";
++	};
++
++	/* stock gpio123 config: pull-up (the default pull-down holds the active-low key "pressed") */
++	smart_key_pin: smart-key-state {
++		pins = "gpio123";
++		function = "gpio";
++		drive-strength = <2>;
++		bias-pull-up;
++	};
++
++	wcd_reset_n: wcd-reset-n-state {
++		pins = "gpio83";
++		function = "gpio";
++		drive-strength = <16>;
++		output-high;
++	};
++
++	/* FSA2275 audio switch: gpio90 low = speaker (high = USB-C headset), gpio47 low = unmuted */
++	audio-switch-sel-hog {
++		gpio-hog;
++		gpios = <90 GPIO_ACTIVE_HIGH>;
++		output-low;
++		line-name = "audio-switch-sel";
++	};
++
++	audio-switch-mute-hog {
++		gpio-hog;
++		gpios = <47 GPIO_ACTIVE_HIGH>;
++		output-low;
++		line-name = "audio-switch-mute";
++	};
++
++	tp_pins: tp-state {
++		pins = "gpio21", "gpio22";
++		function = "gpio";
++		drive-strength = <4>;
++		bias-pull-up;
++	};
+ };
+ 
+ &usb_1 {

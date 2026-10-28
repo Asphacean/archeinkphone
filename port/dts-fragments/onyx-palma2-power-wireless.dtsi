@@ -1,0 +1,188 @@
+// SPDX-License-Identifier: BSD-3-Clause
+/*
+ * Palma 2 secondary HW: remoteprocs, WiFi, Bluetooth, PMIC ADC/thermal.
+ * #include "dts-fragments/onyx-palma2-power-wireless.dtsi" at END of sm6350-onyx-palma2.dts
+ * (after pm7250b.dtsi / pmk8350.dtsi / pm6150l.dtsi includes and the regulator blocks).
+ * Needs the two dt-bindings includes below (the main DTS may already include the pmk8350 one).
+ * FP4 = port/ref/sm7225-fairphone-fp4.dts. Confidence: H high, M medium, L low/untested.
+ * Nothing here has been built or booted.
+ */
+#include <dt-bindings/iio/qcom,spmi-adc7-pmk8350.h>
+#include <dt-bindings/iio/qcom,spmi-vadc.h>
+
+/* ---- Remoteprocs. FP4 lines 291-294, 594-597, 756-759, 713-717. Conf: H (labels), M (firmware paths) ---- */
+&adsp {
+	firmware-name = "qcom/sm6350/onyx/palma2/adsp.mbn";
+	status = "okay";
+};
+
+&cdsp {
+	firmware-name = "qcom/sm6350/onyx/palma2/cdsp.mbn";
+	status = "okay";
+};
+
+&mpss {
+	firmware-name = "qcom/sm6350/onyx/palma2/modem.mbn";
+	status = "okay";
+};
+
+/* IPA only needed for modem data; Palma 2 has no confirmed modem use. Leave disabled until needed.
+ * FP4 uses firmware-name = "qcom/sm7225/fairphone4/ipa_fws.mbn". */
+/* &ipa { firmware-name = "qcom/sm6350/onyx/palma2/ipa_fws.mbn"; status = "okay"; }; */
+
+/* ---- WiFi: ath10k-snoc, WCN39xx. FP4 lines 1263-1270. Stock: qcom,icnss@18800000 (same reg as &wifi). Conf: H node, M supply map ---- */
+/* Supply mapping reuses FP4's (same PMIC rails, stock icnss/bt supplies are on the same
+ * l7a/l2e/l10e/l11e/l4a family per phandles, but stock phandles were NOT resolved to names). */
+&wifi {
+	vdd-0.8-cx-mx-supply = <&vreg_l4a>;
+	vdd-1.8-xo-supply = <&vreg_l7a>;
+	vdd-1.3-rfa-supply = <&vreg_l2e>;
+	vdd-3.3-ch0-supply = <&vreg_l10e>;
+	vdd-3.3-ch1-supply = <&vreg_l11e>;
+	/* Optional: qcom,calibration-variant = "..."; selects board-2.bin entry (see HW_NOTES) */
+	status = "okay";
+};
+
+/* ---- Bluetooth on uart1 (stock: bt_wcn3990 + serial@884000 = uart1; wake GPIO64, swctrl GPIO69).
+ * FP4 lines 1186-1207 (compatible "qcom,wcn3988-bt"). Conf: M. Try "qcom,wcn3990-bt" if 3988 fails. ---- */
+&uart1 {
+	/delete-property/ interrupts;
+	interrupts-extended = <&intc GIC_SPI 602 IRQ_TYPE_LEVEL_HIGH>,
+			      <&tlmm 64 IRQ_TYPE_EDGE_FALLING>;
+	pinctrl-names = "default", "sleep";
+	pinctrl-1 = <&qup_uart1_sleep_cts>, <&qup_uart1_sleep_rts>,
+		    <&qup_uart1_sleep_tx>, <&qup_uart1_sleep_rx>;
+	status = "okay";
+
+	bluetooth {
+		compatible = "qcom,wcn3988-bt";
+		vddio-supply = <&vreg_l11a>;
+		vddxo-supply = <&vreg_l7a>;
+		vddrf-supply = <&vreg_l2e>;
+		vddch0-supply = <&vreg_l10e>;
+		swctrl-gpios = <&tlmm 69 GPIO_ACTIVE_HIGH>;	/* stock qca,bt-sw-ctrl-gpio = <&tlmm 69> */
+		max-speed = <3200000>;
+	};
+};
+
+/* UART1 pin tweaks, FP4 lines 1019-1056 / 1123-1170. Conf: H (same pins in stock: 61-64) */
+&qup_uart1_cts { /delete-property/ bias-disable; bias-bus-hold; };
+&qup_uart1_rts { drive-strength = <2>; /delete-property/ bias-pull-down; bias-disable; };
+&qup_uart1_rx  { /delete-property/ bias-disable; bias-pull-up; };
+&qup_uart1_tx  { drive-strength = <2>; /delete-property/ bias-pull-up; bias-disable; };
+
+&tlmm {
+	qup_uart1_sleep_cts: qup-uart1-sleep-cts-state {
+		pins = "gpio61"; function = "gpio"; bias-bus-hold;
+	};
+	qup_uart1_sleep_rts: qup-uart1-sleep-rts-state {
+		pins = "gpio62"; function = "gpio"; bias-pull-down;
+	};
+	qup_uart1_sleep_rx: qup-uart1-sleep-rx-state {
+		pins = "gpio64"; function = "gpio"; bias-pull-up;
+	};
+	qup_uart1_sleep_tx: qup-uart1-sleep-tx-state {
+		pins = "gpio63"; function = "gpio"; bias-pull-up;
+	};
+};
+
+/* ---- pmk8350 ADC ("no channels defined" fix). FP4 lines 984-1017. Stock pmk8350_vadc has
+ * die_temp@603, ref_gnd@600, xo_therm@644, vref_1p25@601. Conf: H for xo_therm ---- */
+&pmk8350_vadc {
+	channel@644 {
+		reg = <PMK8350_ADC7_AMUX_THM1_100K_PU>;
+		qcom,ratiometric;
+		qcom,hw-settle-time = <200>;
+		qcom,pre-scaling = <1 1>;
+		label = "xo_therm";
+	};
+	/* die_temp: kernel adc7 driver adds PMK8350_ADC7_DIE_TEMP (0x03) only if declared; optional */
+	channel@3 {
+		reg = <PMK8350_ADC7_DIE_TEMP>;
+		qcom,pre-scaling = <1 1>;
+		label = "pmk8350_die_temp";
+	};
+};
+
+&pmk8350_adc_tm {
+	status = "okay";
+	xo-therm@0 {
+		reg = <0>;
+		io-channels = <&pmk8350_vadc PMK8350_ADC7_AMUX_THM1_100K_PU>;
+		qcom,hw-settle-time-us = <200>;
+		qcom,ratiometric;
+	};
+};
+
+/* ---- pm7250b ADC (adc5): battery temp/id + charger/conn therm. FP4 lines 899-933 has only
+ * charger_skin_therm (0x4d) and conn_therm (0x4f); stock pm7250b_vadc ALSO defines
+ * bat_therm@4a (30k pull-up variant 0x2a, 400k 0x6a), bat_id@4b, vph_pwr@83, vbat_sns@84,
+ * chg_temp@9, die_temp@6, usb_in_i_uv@7, usb_in_v_div_16@8. Conf: H for 4d/4f, M for 4a/4b ---- */
+&pm7250b_adc {
+	channel@4d {
+		reg = <ADC5_AMUX_THM1_100K_PU>;
+		qcom,ratiometric;
+		qcom,hw-settle-time = <200>;
+		qcom,pre-scaling = <1 1>;
+		label = "charger_skin_therm";
+	};
+	channel@4f {
+		reg = <ADC5_AMUX_THM3_100K_PU>;
+		qcom,ratiometric;
+		qcom,hw-settle-time = <200>;
+		qcom,pre-scaling = <1 1>;
+		label = "conn_therm";
+	};
+	/* Battery thermistor: stock bat_therm@4a (AMUX_THM2_100K_PU), battery-therm-kohm=10 / 100k NTC
+	 * per stock qcom,battery-data (battery-beta 0xd70=3440). Needed by a future QG/fg driver. */
+	channel@4a {
+		reg = <ADC5_AMUX_THM2_100K_PU>;
+		qcom,ratiometric;
+		qcom,hw-settle-time = <200>;
+		qcom,pre-scaling = <1 1>;
+		label = "bat_therm";
+	};
+	channel@4b {
+		reg = <ADC5_AMUX_GPIO2_100K_PU>;	/* 0x4b = bat_id (stock label). */
+		qcom,ratiometric;
+		qcom,hw-settle-time = <200>;
+		qcom,pre-scaling = <1 1>;
+		label = "bat_id";
+	};
+};
+
+&pm7250b_adc_tm {
+	status = "okay";
+	charger-skin-therm@0 {
+		reg = <0>;
+		io-channels = <&pm7250b_adc ADC5_AMUX_THM1_100K_PU>;
+		qcom,ratiometric;
+		qcom,hw-settle-time-us = <200>;
+	};
+	conn-therm@1 {
+		reg = <1>;
+		io-channels = <&pm7250b_adc ADC5_AMUX_THM3_100K_PU>;
+		qcom,ratiometric;
+		qcom,hw-settle-time-us = <200>;
+	};
+};
+
+/* ---- Battery / charger / fuel gauge ----
+ * NO mainline node to copy: FP4 has only pm7250b_typec/vbus (FP4 comment at line 947-950: "without
+ * charger driver"). Stock uses vendor drivers on pm7250b: qcom,qpnp-qg (fuel gauge, SPMI 0x4800/
+ * sdam 0xb100) + qcom,qpnp-smb5 (charger) + external smb1396/smb1398 charge pumps on I2C.
+ * Mainline has neither (no qpnp-qg, no smb5; qcom_pmi8998_charger/qcom_fg are smb2/fg3 for
+ * pmi8998 only). The battery stays charging via PMIC hardware autonomously; no DT to add.
+ * Static fallback so userspace shows a capacity-less battery is NOT possible without a driver.
+ * Optional stopgap (Conf: M): simple-battery node documents the cell for a future driver. */
+/ {
+	battery: battery {
+		compatible = "simple-battery";
+		/* stock qcom,battery-data: 7381805_Onyx_Note6_3950mAh_PM7250B ... */
+		voltage-max-design-microvolt = <4450000>;	/* stock qcom,max-voltage-uv 0x43e6d0 */
+		constant-charge-current-max-microamp = <2000000>; /* stock fastchg-current-ma 0x7d0 */
+		charge-term-current-microamp = <150000>;	/* stock qg-iterm-ma 0x96 */
+		/* nominal capacity: model name says 3950 mAh; node name says 4030 mAh -> use charge-full-design
+		 * only after confirming; do not guess. */
+	};
+};

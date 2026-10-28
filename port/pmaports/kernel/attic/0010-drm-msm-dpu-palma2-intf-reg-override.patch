@@ -1,0 +1,60 @@
+diff -ruN tree.p9/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_intf.c tree/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_intf.c
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_intf.c	2026-10-26 20:06:18
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_intf.c	2026-10-26 20:06:18
+@@ -11,7 +11,39 @@
+ #include "dpu_trace.h"
+ 
+ #include <linux/iopoll.h>
++#include <linux/moduleparam.h>
+ 
++/*
++ * Palma 2 experiment: raw INTF register overrides applied after the timing
++ * engine setup and after the programmable-fetch setup, before the timing engine
++ * is enabled.  Format: "off=val,off=val" (hex ok), e.g.
++ * dpu_intf_ovr=0x60=0,0x64=0,0x68=0,0x1c4=0xa00,0x170=0x1637d5
++ */
++static char *dpu_intf_ovr;
++module_param(dpu_intf_ovr, charp, 0644);
++
++static void dpu_hw_intf_apply_ovr(struct dpu_hw_blk_reg_map *c, const char *tag)
++{
++	char buf[256], *s, *tok;
++
++	if (!dpu_intf_ovr || !*dpu_intf_ovr)
++		return;
++	strscpy(buf, dpu_intf_ovr, sizeof(buf));
++	s = buf;
++	while ((tok = strsep(&s, ",")) != NULL) {
++		char *eq = strchr(tok, '=');
++		u32 off, val;
++
++		if (!eq)
++			continue;
++		*eq = 0;
++		if (kstrtou32(tok, 0, &off) || kstrtou32(eq + 1, 0, &val))
++			continue;
++		DPU_REG_WRITE(c, off, val);
++		pr_info("dpu_intf_ovr[%s]: +%#x <= %#x (readback %#x)\n", tag, off, val, DPU_REG_READ(c, off));
++	}
++}
++
+ #include <drm/drm_managed.h>
+ 
+ #define INTF_TIMING_ENGINE_EN           0x000
+@@ -270,6 +302,8 @@
+ 		DPU_REG_WRITE(c, INTF_DISPLAY_DATA_HCTL, display_data_hctl);
+ 		DPU_REG_WRITE(c, INTF_ACTIVE_DATA_HCTL, active_data_hctl);
+ 	}
++
++	dpu_hw_intf_apply_ovr(c, "timing");
+ }
+ 
+ static void dpu_hw_intf_enable_timing_engine(
+@@ -303,6 +337,7 @@
+ 	}
+ 
+ 	DPU_REG_WRITE(c, INTF_CONFIG, fetch_enable);
++	dpu_hw_intf_apply_ovr(c, "prg_fetch");
+ }
+ 
+ static void dpu_hw_intf_bind_pingpong_blk(

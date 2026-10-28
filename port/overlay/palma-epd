@@ -1,0 +1,20 @@
+#!/bin/sh
+# palma-epd [hd|balanced|fast|ultra|next]: e-ink refresh profile (stock Android: HD / Balanced / Fast / Ultrafast-X).
+# Sets the panel module params live and in /etc/modprobe.d/palma2-eink.conf; no args prints the current profile.
+P=/sys/module/panel_onyx_palma2_tcon/parameters S=/var/lib/palma2/epd-profile
+cur=$(cat $S 2>/dev/null || echo balanced)
+p=$1; [ "$p" = next ] && case $cur in hd) p=balanced;; balanced) p=fast;; fast) p=ultra;; *) p=hd;; esac
+case $p in
+	#               partial  fast  burst settle gc_hard gc_min idle
+	hd)       set -- 21      0     400   250    8       20     1200 ;;   # REGAL only, cleanest, slowest
+	balanced) set -- 21      20    400   250    10      30     1500 ;;   # REGAL, A2 while scrolling, grey redraw after
+	fast)     set -- 21      20    1500  600    20      50     2500 ;;   # A2 for anything quick, longer settle
+	ultra)    set -- 20      20    1500  1500   0       60     4000 ;;   # A2 everywhere (1-bit), no forced GC16
+	"") echo "$cur"; exit 0 ;;
+	*) echo "usage: palma-epd [hd|balanced|fast|ultra|next]" >&2; exit 1 ;;
+esac
+echo $1 > $P/refresh_mode; echo $2 > $P/refresh_fast_mode; echo $3 > $P/refresh_burst_ms; echo $4 > $P/refresh_settle_ms
+echo $5 > $P/refresh_gc_hard; echo $6 > $P/refresh_gc_min; echo $7 > $P/refresh_gc_idle_ms
+echo "options panel_onyx_palma2_tcon refresh_mode=$1 refresh_fast_mode=$2 refresh_burst_ms=$3 refresh_settle_ms=$4 refresh_gc_hard=$5 refresh_gc_min=$6 refresh_gc_idle_ms=$7" > /etc/modprobe.d/palma2-eink.conf
+mkdir -p ${S%/*}; echo $p > $S; echo 1 > $P/refresh_now 2>/dev/null
+echo $p

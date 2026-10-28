@@ -1,0 +1,16 @@
+#!/bin/sh
+# palma-ui [plasma|phosh|sxmo|lomiri]: pick the shell started by display-manager (plasma-mobile.service drop-in)
+# no arg: run the selected shell (ExecStart). Selection in /etc/palma-ui, default plasma.
+if [ -n "$1" ]; then
+	# phosh assumes a portrait-native panel on phones and resets our rotation on lock/unlock; "tablet" skips that
+	[ "$1" = phosh ] && hostnamectl set-chassis tablet || hostnamectl set-chassis handset
+	echo "$1" > /etc/palma-ui && systemctl restart display-manager; exit
+fi
+# the user manager outlives display-manager restarts (ssh, linger): end the previous shell's session first
+systemctl --user stop graphical-session.target plasma-workspace.target 2>/dev/null
+case "$(cat /etc/palma-ui 2>/dev/null)" in
+phosh)	exec phosh-session ;;
+sxmo)	exec sxmo_swayinit.sh ;;
+lomiri)	exec lomiri-session ;;
+*)	exec startplasmamobile ;;
+esac

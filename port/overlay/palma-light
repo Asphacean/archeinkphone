@@ -1,0 +1,10 @@
+#!/bin/sh
+# palma-light [B T | apply]: front light brightness 0..100 % and colour temperature 0 (cold) .. 100 (warm).
+# No args: print the saved "B T". Mapped onto the stock Onyx 33x33 tables (palma_frontlight.py --level BR CT).
+S=/var/lib/palma2/light
+if [ $# -ge 2 ]; then mkdir -p "${S%/*}"; echo "$(( $1 < 0 ? 0 : $1 > 100 ? 100 : $1 )) $(( $2 < 0 ? 0 : $2 > 100 ? 100 : $2 ))" > "$S"; fi
+read b t < "$S" 2>/dev/null || { b=30; t=0; }
+if [ $# -ge 1 ]; then
+	/usr/bin/python3 /usr/local/bin/palma_frontlight.py --level $(( (b * 32 + 50) / 100 )) $(( (t * 32 + 50) / 100 )) >/dev/null
+fi
+echo "$b $t"

@@ -1,0 +1,9 @@
+[Unit]
+Description=Palma 2 side buttons (left button = e-ink full refresh)
+
+[Service]
+ExecStart=/usr/bin/python3 /usr/local/bin/palma-keys.py
+Restart=always
+
+[Install]
+WantedBy=multi-user.target

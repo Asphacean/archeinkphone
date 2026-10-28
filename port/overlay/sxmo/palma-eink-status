@@ -1,0 +1,6 @@
+#!/bin/sh
+# conky widget lines: front light, warmth, TCON contrast, e-ink refresh profile
+read b t < /var/lib/palma2/light 2>/dev/null || { b=?; t=?; }
+c=$(sed -n 's/.*tcon_contrast=//p' /etc/modprobe.d/palma2-contrast.conf 2>/dev/null)
+l1="Light $b%   Warm $t%"; l2="Contrast ${c:-64}   Mode $(cat /var/lib/palma2/epd-profile 2>/dev/null || echo balanced)"
+case $1 in 1) echo "$l1";; 2) echo "$l2";; *) printf "%s\n%s\n" "$l1" "$l2";; esac

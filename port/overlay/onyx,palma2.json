@@ -1,0 +1,23 @@
+{
+  "name" : "$device",
+  "parent-name": "default",
+  "profiles" : [
+    {
+      "name" : "quiet",
+      "feedbacks" : [
+        {
+          "event-name" : "button-pressed",
+          "type"       : "VibraPattern",
+          "magnitudes" : [ 1.0 ],
+          "durations"  : [ 35 ]
+        },
+        {
+          "event-name" : "key-pressed",
+          "type"       : "VibraPattern",
+          "magnitudes" : [ 1.0 ],
+          "durations"  : [ 35 ]
+        }
+      ]
+    }
+  ]
+}

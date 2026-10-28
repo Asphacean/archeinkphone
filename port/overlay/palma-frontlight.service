@@ -1,0 +1,10 @@
+[Unit]
+Description=Boox Palma 2 front light default level
+After=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/local/bin/palma_frontlight.py 30
+
+[Install]
+WantedBy=multi-user.target

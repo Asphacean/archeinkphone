@@ -1,0 +1,553 @@
+diff --git a/device/community/linux-postmarketos-qcom-sm6350/0001-arm64-dts-qcom-add-onyx-palma2.patch b/device/community/linux-postmarketos-qcom-sm6350/0001-arm64-dts-qcom-add-onyx-palma2.patch
+new file mode 100644
+index 0000000000..d909582a77
+--- /dev/null
++++ b/device/community/linux-postmarketos-qcom-sm6350/0001-arm64-dts-qcom-add-onyx-palma2.patch
+@@ -0,0 +1,435 @@
++From: Asphacean <17112646+Asphacean@users.noreply.github.com>
++Subject: [PATCH] arm64: dts: qcom: add Onyx Boox Palma 2 (sm6350)
++
++Stage 1 device tree: boot, UFS, USB peripheral, keys. Display (Lattice FPGA TCON on DSI) later.
++
++---
++ arch/arm64/boot/dts/qcom/Makefile              |   1 +
++ arch/arm64/boot/dts/qcom/sm6350-onyx-palma2.dts | 409 +++
++ 2 files changed, 410 insertions(+)
++
++diff --git a/arch/arm64/boot/dts/qcom/Makefile b/arch/arm64/boot/dts/qcom/Makefile
++--- a/arch/arm64/boot/dts/qcom/Makefile
+++++ b/arch/arm64/boot/dts/qcom/Makefile
++@@ -343,6 +343,7 @@
++ dtb-$(CONFIG_ARCH_QCOM)	+= sm6125-xiaomi-laurel-sprout.dtb
++ dtb-$(CONFIG_ARCH_QCOM)	+= sm6125-xiaomi-willow.dtb
++ dtb-$(CONFIG_ARCH_QCOM)	+= sm6350-sony-xperia-lena-pdx213.dtb
+++dtb-$(CONFIG_ARCH_QCOM)	+= sm6350-onyx-palma2.dtb
++ dtb-$(CONFIG_ARCH_QCOM)	+= sm6375-sony-xperia-murray-pdx225.dtb
++ dtb-$(CONFIG_ARCH_QCOM)	+= sm7125-xiaomi-curtana.dtb
++ dtb-$(CONFIG_ARCH_QCOM)	+= sm7125-xiaomi-joyeuse.dtb
++diff --git a/arch/arm64/boot/dts/qcom/sm6350-onyx-palma2.dts b/arch/arm64/boot/dts/qcom/sm6350-onyx-palma2.dts
++new file mode 100644
++--- /dev/null
+++++ b/arch/arm64/boot/dts/qcom/sm6350-onyx-palma2.dts
++@@ -0,0 +1,409 @@
+++// SPDX-License-Identifier: BSD-3-Clause
+++/*
+++ * Onyx Boox Palma 2 (SM6350 "lagoon", board MTP P6). Derived from sm7225-fairphone-fp4.dts
+++ * (same PMIC set: PM6350, PM6150L, PM7250B, PMK8350; regulator ranges verified identical
+++ * against the stock Android DT, see recon/root/live.dts).
+++ *
+++ * Stage 1: boot + USB gadget only. Display (FPGA TCON over DSI) and touch come later.
+++ */
+++/dts-v1/;
+++
+++/* PM7250B is configured to use SID2/3 */
+++#define PM7250B_SID 2
+++#define PM7250B_SID1 3
+++/* PMK8350 is configured to use SID6 instead of 0 */
+++#define PMK8350_SID 6
+++
+++#include <dt-bindings/gpio/gpio.h>
+++#include <dt-bindings/input/input.h>
+++#include <dt-bindings/pinctrl/qcom,pmic-gpio.h>
+++#include <dt-bindings/regulator/qcom,rpmh-regulator.h>
+++#include "sm6350.dtsi"
+++#include "pm6150l.dtsi"
+++#include "pm6350.dtsi"
+++#include "pm7250b.dtsi"
+++#include "pmk8350.dtsi"
+++
+++/ {
+++	model = "Onyx Boox Palma 2";
+++	compatible = "onyx,palma2", "qcom,sm6350";
+++	chassis-type = "handset";
+++
+++	/* required for bootloader to select correct board */
+++	qcom,msm-id = <434 0x10000>;	/* SM6350 */
+++	qcom,board-id = <8 0>;		/* MTP, subtype 0 (stock DT) */
+++
+++	aliases {
+++		serial0 = &uart9;
+++	};
+++
+++	chosen {
+++		stdout-path = "serial0:115200n8";
+++	};
+++
+++	gpio-keys {
+++		compatible = "gpio-keys";
+++		pinctrl-names = "default";
+++		pinctrl-0 = <&gpio_keys_pin>;
+++
+++		key-volume-up {
+++			label = "volume_up";
+++			linux,code = <KEY_VOLUMEUP>;
+++			gpios = <&pm6350_gpios 2 GPIO_ACTIVE_LOW>;
+++		};
+++
+++		/* side "smart" button, stock keycode 250 */
+++		key-smart {
+++			label = "smart_key";
+++			linux,code = <KEY_PROG1>;
+++			gpios = <&tlmm 123 GPIO_ACTIVE_LOW>;
+++		};
+++	};
+++};
+++
+++&apps_rsc {
+++	regulators-0 {
+++		compatible = "qcom,pm6350-rpmh-regulators";
+++		qcom,pmic-id = "a";
+++
+++		vreg_s1a: smps1 {
+++			regulator-name = "vreg_s1a";
+++			regulator-min-microvolt = <1000000>;
+++			regulator-max-microvolt = <1200000>;
+++		};
+++
+++		vreg_s2a: smps2 {
+++			regulator-name = "vreg_s2a";
+++			regulator-min-microvolt = <1503000>;
+++			regulator-max-microvolt = <2048000>;
+++		};
+++
+++		vreg_l2a: ldo2 {
+++			regulator-name = "vreg_l2a";
+++			regulator-min-microvolt = <1503000>;
+++			regulator-max-microvolt = <1980000>;
+++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+++		};
+++
+++		vreg_l3a: ldo3 {
+++			regulator-name = "vreg_l3a";
+++			regulator-min-microvolt = <2700000>;
+++			regulator-max-microvolt = <3300000>;
+++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+++		};
+++
+++		vreg_l4a: ldo4 {
+++			regulator-name = "vreg_l4a";
+++			regulator-min-microvolt = <352000>;
+++			regulator-max-microvolt = <801000>;
+++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+++		};
+++
+++		vreg_l5a: ldo5 {
+++			regulator-name = "vreg_l5a";
+++			regulator-min-microvolt = <1503000>;
+++			regulator-max-microvolt = <1980000>;
+++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+++		};
+++
+++		vreg_l6a: ldo6 {
+++			regulator-name = "vreg_l6a";
+++			regulator-min-microvolt = <1710000>;
+++			regulator-max-microvolt = <3544000>;
+++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+++		};
+++
+++		vreg_l7a: ldo7 {
+++			regulator-name = "vreg_l7a";
+++			regulator-min-microvolt = <1620000>;
+++			regulator-max-microvolt = <1980000>;
+++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+++		};
+++
+++		vreg_l8a: ldo8 {
+++			regulator-name = "vreg_l8a";
+++			regulator-min-microvolt = <2800000>;
+++			regulator-max-microvolt = <2800000>;
+++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+++		};
+++
+++		vreg_l9a: ldo9 {
+++			regulator-name = "vreg_l9a";
+++			regulator-min-microvolt = <1650000>;
+++			regulator-max-microvolt = <3401000>;
+++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+++		};
+++
+++		vreg_l11a: ldo11 {
+++			regulator-name = "vreg_l11a";
+++			regulator-min-microvolt = <1800000>;
+++			regulator-max-microvolt = <2000000>;
+++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+++		};
+++
+++		vreg_l12a: ldo12 {
+++			regulator-name = "vreg_l12a";
+++			regulator-min-microvolt = <1620000>;
+++			regulator-max-microvolt = <1980000>;
+++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+++		};
+++
+++		vreg_l13a: ldo13 {
+++			regulator-name = "vreg_l13a";
+++			regulator-min-microvolt = <570000>;
+++			regulator-max-microvolt = <650000>;
+++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+++		};
+++
+++		vreg_l14a: ldo14 {
+++			regulator-name = "vreg_l14a";
+++			regulator-min-microvolt = <1700000>;
+++			regulator-max-microvolt = <1900000>;
+++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+++		};
+++
+++		vreg_l15a: ldo15 {
+++			regulator-name = "vreg_l15a";
+++			regulator-min-microvolt = <1100000>;
+++			regulator-max-microvolt = <1305000>;
+++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+++		};
+++
+++		vreg_l16a: ldo16 {
+++			regulator-name = "vreg_l16a";
+++			regulator-min-microvolt = <830000>;
+++			regulator-max-microvolt = <921000>;
+++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+++		};
+++
+++		vreg_l18a: ldo18 {
+++			regulator-name = "vreg_l18a";
+++			regulator-min-microvolt = <788000>;
+++			regulator-max-microvolt = <1049000>;
+++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+++		};
+++
+++		vreg_l19a: ldo19 {
+++			regulator-name = "vreg_l19a";
+++			regulator-min-microvolt = <1080000>;
+++			regulator-max-microvolt = <1305000>;
+++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+++		};
+++
+++		vreg_l20a: ldo20 {
+++			regulator-name = "vreg_l20a";
+++			regulator-min-microvolt = <530000>;
+++			regulator-max-microvolt = <801000>;
+++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+++		};
+++
+++		vreg_l21a: ldo21 {
+++			regulator-name = "vreg_l21a";
+++			regulator-min-microvolt = <751000>;
+++			regulator-max-microvolt = <825000>;
+++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+++		};
+++
+++		vreg_l22a: ldo22 {
+++			regulator-name = "vreg_l22a";
+++			regulator-min-microvolt = <1080000>;
+++			regulator-max-microvolt = <1305000>;
+++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+++		};
+++	};
+++
+++	regulators-1 {
+++		compatible = "qcom,pm6150l-rpmh-regulators";
+++		qcom,pmic-id = "e";
+++
+++		vreg_s8e: smps8 {
+++			regulator-name = "vreg_s8e";
+++			regulator-min-microvolt = <313000>;
+++			regulator-max-microvolt = <1395000>;
+++		};
+++
+++		vreg_l1e: ldo1 {
+++			regulator-name = "vreg_l1e";
+++			regulator-min-microvolt = <1620000>;
+++			regulator-max-microvolt = <1980000>;
+++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+++		};
+++
+++		vreg_l2e: ldo2 {
+++			regulator-name = "vreg_l2e";
+++			regulator-min-microvolt = <1170000>;
+++			regulator-max-microvolt = <1305000>;
+++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+++		};
+++
+++		vreg_l3e: ldo3 {
+++			regulator-name = "vreg_l3e";
+++			regulator-min-microvolt = <1100000>;
+++			regulator-max-microvolt = <1299000>;
+++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+++		};
+++
+++		vreg_l4e: ldo4 {
+++			regulator-name = "vreg_l4e";
+++			regulator-min-microvolt = <1620000>;
+++			regulator-max-microvolt = <3300000>;
+++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+++		};
+++
+++		vreg_l5e: ldo5 {
+++			regulator-name = "vreg_l5e";
+++			regulator-min-microvolt = <1620000>;
+++			regulator-max-microvolt = <3300000>;
+++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+++		};
+++
+++		vreg_l6e: ldo6 {
+++			regulator-name = "vreg_l6e";
+++			regulator-min-microvolt = <1700000>;
+++			regulator-max-microvolt = <2950000>;
+++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+++			regulator-allow-set-load;
+++			regulator-allowed-modes = <RPMH_REGULATOR_MODE_LPM
+++						   RPMH_REGULATOR_MODE_HPM>;
+++		};
+++
+++		vreg_l7e: ldo7 {
+++			regulator-name = "vreg_l7e";
+++			regulator-min-microvolt = <2700000>;
+++			regulator-max-microvolt = <3544000>;
+++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+++		};
+++
+++		vreg_l8e: ldo8 {
+++			regulator-name = "vreg_l8e";
+++			regulator-min-microvolt = <1620000>;
+++			regulator-max-microvolt = <2000000>;
+++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+++		};
+++
+++		vreg_l9e: ldo9 {
+++			regulator-name = "vreg_l9e";
+++			regulator-min-microvolt = <2700000>;
+++			regulator-max-microvolt = <2960000>;
+++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+++			regulator-allow-set-load;
+++			regulator-allowed-modes = <RPMH_REGULATOR_MODE_LPM
+++						   RPMH_REGULATOR_MODE_HPM>;
+++		};
+++
+++		vreg_l10e: ldo10 {
+++			regulator-name = "vreg_l10e";
+++			regulator-min-microvolt = <3000000>;
+++			regulator-max-microvolt = <3401000>;
+++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+++		};
+++
+++		vreg_l11e: ldo11 {
+++			regulator-name = "vreg_l11e";
+++			regulator-min-microvolt = <3000000>;
+++			regulator-max-microvolt = <3401000>;
+++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+++		};
+++
+++		vreg_bob: bob {
+++			regulator-name = "vreg_bob";
+++			regulator-min-microvolt = <1620000>;
+++			regulator-max-microvolt = <5492000>;
+++			regulator-initial-mode = <RPMH_REGULATOR_MODE_AUTO>;
+++			regulator-allow-bypass;
+++		};
+++	};
+++};
+++
+++&pm6350_gpios {
+++	gpio_keys_pin: gpio-keys-state {
+++		pins = "gpio2";
+++		function = PMIC_GPIO_FUNC_NORMAL;
+++		bias-pull-up;
+++		input-enable;
+++		power-source = <0>;
+++	};
+++};
+++
+++&pmk8350_pon {
+++	status = "disabled";
+++};
+++
+++&pmk8350_rtc {
+++	status = "okay";
+++};
+++
+++&qupv3_id_0 {
+++	status = "okay";
+++};
+++
+++&qupv3_id_1 {
+++	status = "okay";
+++};
+++
+++&uart9 {
+++	status = "okay";
+++};
+++
+++&ufs_mem_hc {
+++	reset-gpios = <&tlmm 156 GPIO_ACTIVE_LOW>;
+++
+++	vcc-supply = <&vreg_l7e>;
+++	vcc-max-microamp = <800000>;
+++	vccq2-supply = <&vreg_l12a>;
+++	vccq2-max-microamp = <800000>;
+++
+++	status = "okay";
+++};
+++
+++&ufs_mem_phy {
+++	vdda-phy-supply = <&vreg_l18a>;
+++	vdda-pll-supply = <&vreg_l22a>;
+++
+++	status = "okay";
+++};
+++
+++&tlmm {
+++	/* 13-16: fingerprint SPI (secure). FP4 also reserves 56-57, but on Palma 2 those are the FPGA SPI pins. */
+++	gpio-reserved-ranges = <13 4>;
+++};
+++
+++&usb_1 {
+++	status = "okay";
+++};
+++
+++&usb_1_dwc3 {
+++	/* stage 1: plain gadget, no Type-C role switching yet */
+++	dr_mode = "peripheral";
+++	maximum-speed = "high-speed";
+++};
+++
+++&usb_1_hsphy {
+++	vdd-supply = <&vreg_l18a>;
+++	vdda-pll-supply = <&vreg_l2a>;
+++	vdda-phy-dpdm-supply = <&vreg_l3a>;
+++
+++	status = "okay";
+++};
+++
+++&usb_1_qmpphy {
+++	vdda-phy-supply = <&vreg_l16a>;
+++	vdda-pll-supply = <&vreg_l22a>;
+++
+++	status = "okay";
+++};
+++
+++/*
+++ * Stage 2 (display), from the reverse-engineered stock driver (PLAN.md "Фаза 1b"):
+++ *
+++ * &i2c7 { lfe5u_tcon: tcon@34 { compatible = "onyx,lfe5u-tcon"; reg = <0x34>;
+++ *     vdd1v8-supply = <&vreg_l5a>; vdd1v2-supply = <&vreg_l3e>;
+++ *     reset-gpios = <&tlmm 122 GPIO_ACTIVE_LOW>; standby-gpios = <&tlmm 96 GPIO_ACTIVE_LOW>;
+++ *     program-gpios = <&tlmm 38 GPIO_ACTIVE_LOW>; init-gpios = <&tlmm 9 GPIO_ACTIVE_LOW>;
+++ *     done-gpios = <&tlmm 8 GPIO_ACTIVE_HIGH>; pwr-30v-gpios = <&tlmm 97 GPIO_ACTIVE_HIGH>;
+++ *     pwr-12v-core-gpios = <&tlmm 58 GPIO_ACTIVE_HIGH>; onyx,vcom = <200>; }; };
+++ * &mdss_dsi0 { vdda-supply = <&vreg_l22a>; panel@0 { compatible = "onyx,palma2-tcon-panel";
+++ *     1648x824@60, hfp 40 hbp 40 hsw 20, vfp 10 vbp 6 vsw 2, 4 lanes RGB888 video non-burst,
+++ *     reset-gpios = <&pm6150l_gpios 9 GPIO_ACTIVE_LOW>; DCS 0x11 on / 0x10 off }; };
+++ * &mdss_dsi0_phy { vdds-supply = <&vreg_l18a>; };
+++ */
+diff --git a/device/community/linux-postmarketos-qcom-sm6350/APKBUILD b/device/community/linux-postmarketos-qcom-sm6350/APKBUILD
+index 1ab893e47c..458a501a51 100644
+--- a/device/community/linux-postmarketos-qcom-sm6350/APKBUILD
++++ b/device/community/linux-postmarketos-qcom-sm6350/APKBUILD
+@@ -2,7 +2,7 @@ maintainer="Luca Weiss <luca@lucaweiss.eu>"
+ _flavor="postmarketos-qcom-sm6350"
+ pkgname=linux-$_flavor
+ pkgver=7.2.0
+-pkgrel=0
++pkgrel=1
+ pkgdesc="Mainline Kernel fork for SM6350/SM7225 devices"
+ arch="aarch64"
+ _carch="arm64"
+@@ -38,6 +38,7 @@ _tag="v$pkgver-sm6350"
+ source="
+ 	https://github.com/sm6350-mainline/$_repo/archive/$_tag/$_repo-$_tag.tar.gz
+ 	$_config
++	0001-arm64-dts-qcom-add-onyx-palma2.patch
+ "
+ builddir="$srcdir/$_repo-$pkgver-sm6350"
+ 
+@@ -77,4 +78,5 @@ package() {
+ sha512sums="
+ 2247377b260eba48a3bc2840fe8a55cec82c391949b59dc83093af27cdec66245efb8f3c7fc4e105fa8b1da090335cacad8bcc6cfa128dd25ff7b473297f2530  linux-v7.2.0-sm6350.tar.gz
+ e20a5b4921cd0a496ed95422696e5e93a9c717c8b903b4877166f34c7c773b02adceb8edd6394648ed95e7d55f066dcf89c64df3ffe9fb6cb6565335e8d51631  config-postmarketos-qcom-sm6350.aarch64
++c6e9a915aa550cfed3a23134f0a59893584b250f9fd0390261dd8889f621166f88dfef791c4807c1a541dd3a9b79cbb8909c7a5cc9aae3d6bf5a3f0be8da5786  0001-arm64-dts-qcom-add-onyx-palma2.patch
+ "
+diff --git a/device/testing/device-onyx-palma2/APKBUILD b/device/testing/device-onyx-palma2/APKBUILD
+new file mode 100644
+index 0000000000..c2d7b919f5
+--- /dev/null
++++ b/device/testing/device-onyx-palma2/APKBUILD
+@@ -0,0 +1,36 @@
++# Reference: <https://postmarketos.org/devicepkg>
++maintainer="Asphacean <17112646+Asphacean@users.noreply.github.com>"
++pkgname=device-onyx-palma2
++pkgdesc="Onyx Boox Palma 2"
++pkgver=1
++pkgrel=0
++url="https://postmarketos.org"
++license="MIT"
++arch="aarch64"
++options="!check !archcheck"
++depends="
++	linux-postmarketos-qcom-sm6350
++	make-dynpart-mappings
++	mkbootimg
++	postmarketos-base
++	soc-qcom
++	soc-qcom-qbootctl
++"
++makedepends="devicepkg-dev"
++source="
++	deviceinfo
++	modules-initfs
++	"
++
++build() {
++	devicepkg_build $startdir $pkgname
++}
++
++package() {
++	devicepkg_package $startdir $pkgname
++}
++
++sha512sums="
++91ac4e90a44aed8ca56b8aeb2a0c5146a5e238b39d794f559dd4f35a634cfefc1d54830b6f99cab957bd603380d360da770a375e6038bba84b54f3553ee1ebba  deviceinfo
++cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e  modules-initfs
++"
+diff --git a/device/testing/device-onyx-palma2/deviceinfo b/device/testing/device-onyx-palma2/deviceinfo
+new file mode 100644
+index 0000000000..61d0399a59
+--- /dev/null
++++ b/device/testing/device-onyx-palma2/deviceinfo
+@@ -0,0 +1,34 @@
++# Reference: <https://postmarketos.org/deviceinfo>
++# Please use double quotes only. You can source this file in shell
++# scripts.
++
++deviceinfo_format_version="0"
++deviceinfo_name="Onyx Boox Palma 2"
++deviceinfo_manufacturer="Onyx"
++deviceinfo_codename="onyx-palma2"
++deviceinfo_year="2024"
++deviceinfo_dtb="qcom/sm6350-onyx-palma2"
++deviceinfo_append_dtb="true"
++deviceinfo_arch="aarch64"
++
++# Device related
++deviceinfo_chassis="handset"
++deviceinfo_keyboard="false"
++deviceinfo_external_storage="false"
++deviceinfo_screen_width="824"
++deviceinfo_screen_height="1648"
++deviceinfo_getty="ttyMSM0;115200"
++
++# Bootloader related (stock boot.img: pagesize 4096, kernel 0x8000, ramdisk 0x1000000, tags 0x100)
++deviceinfo_flash_method="fastboot"
++deviceinfo_boot_filesystem="fat32"
++deviceinfo_generate_bootimg="true"
++deviceinfo_flash_pagesize="4096"
++deviceinfo_flash_offset_base="0x00000000"
++deviceinfo_flash_offset_kernel="0x00008000"
++deviceinfo_flash_offset_ramdisk="0x01000000"
++deviceinfo_flash_offset_second="0x00000000"
++deviceinfo_flash_offset_tags="0x00000100"
++deviceinfo_rootfs_image_sector_size="4096"
++deviceinfo_super_partitions="/dev/sda8 /dev/sda8"
++deviceinfo_flash_sparse="true"
+diff --git a/device/testing/device-onyx-palma2/modules-initfs b/device/testing/device-onyx-palma2/modules-initfs
+new file mode 100644
+index 0000000000..e69de29bb2

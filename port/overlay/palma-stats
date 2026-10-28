@@ -1,0 +1,9 @@
+#!/bin/sh
+# one line for the home screen monitor: CPU % (over 1 s), hottest CPU zone, battery temp, RAM %
+s() { awk '/^cpu /{print $2+$3+$4+$5+$6+$7+$8, $5+$6}' /proc/stat; }
+a=$(s); sleep 1; b=$(s)
+cpu=$(echo "$a $b" | awk '{t=$3-$1; i=$4-$2; printf "%d", t ? 100*(t-i)/t : 0}')
+t=0; for z in /sys/class/thermal/thermal_zone*; do case $(cat $z/type) in cpu*) v=$(cat $z/temp); [ "$v" -gt "$t" ] && t=$v;; esac; done
+bat=$(for z in /sys/class/thermal/thermal_zone*; do [ "$(cat $z/type)" = battery-thermal ] && cat $z/temp; done)
+ram=$(awk '/MemTotal/{m=$2} /MemAvailable/{a=$2} END{printf "%d", 100*(m-a)/m}' /proc/meminfo)
+echo "CPU ${cpu}% · ${t%???}°C · RAM ${ram}% · АКБ ${bat%???}°C"

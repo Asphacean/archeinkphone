@@ -1,0 +1,16 @@
+From: Palma 2 bring-up <none@none>
+Subject: [PATCH] clk: qcom: dispcc-sm6350: keep mdss_gdsc always on (palma2 splash experiment)
+
+---
+--- a/drivers/clk/qcom/dispcc-sm6350.c	2026-10-26 17:27:17
++++ b/drivers/clk/qcom/dispcc-sm6350.c	2026-10-26 17:27:17
+@@ -692,7 +692,8 @@
+ 		.name = "mdss_gdsc",
+ 	},
+ 	.pwrsts = PWRSTS_OFF_ON,
+-	.flags = RETAIN_FF_ENABLE,
++	/* Palma 2 experiment: keep the bootloader display pipeline powered (splash takeover) */
++	.flags = RETAIN_FF_ENABLE | ALWAYS_ON,
+ };
+ 
+ static struct clk_regmap *disp_cc_sm6350_clocks[] = {

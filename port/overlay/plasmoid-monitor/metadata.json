@@ -1,0 +1,14 @@
+{
+    "KPackageStructure": "Plasma/Applet",
+    "KPlugin": {
+        "Authors": [{ "Name": "palma2" }],
+        "Category": "System Information",
+        "Description": "CPU, temperature and RAM, refreshed every 10 s (e-ink friendly)",
+        "Icon": "utilities-system-monitor",
+        "Id": "org.palma2.monitor",
+        "License": "GPL",
+        "Name": "Device monitor",
+        "Name[ru]": "Монитор устройства"
+    },
+    "X-Plasma-API-Minimum-Version": "6.0"
+}

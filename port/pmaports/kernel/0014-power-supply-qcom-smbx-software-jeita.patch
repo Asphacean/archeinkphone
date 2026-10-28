@@ -1,0 +1,128 @@
+diff -ruN a/drivers/power/supply/qcom_smbx.c b/drivers/power/supply/qcom_smbx.c
+--- a/drivers/power/supply/qcom_smbx.c	2026-10-27 02:07:36
++++ b/drivers/power/supply/qcom_smbx.c	2026-10-27 02:07:51
+@@ -256,8 +256,23 @@
+ 	struct iio_channel *usb_in_v_chan;
+ 
+ 	struct power_supply *chg_psy;
++
++	struct iio_channel *batt_therm_chan;
++	struct delayed_work jeita_work;
++	int jeita_zone;
+ };
+ 
++/*
++ * Software JEITA (stock Boox Palma 2 runs qcom,sw-jeita-enable): battery
++ * temperature zones in milli-degC. Below 0 and from 50 charging stops, 0..10
++ * and 45..50 halve the charge current, 45..50 also drops the float voltage.
++ */
++enum { JEITA_COLD, JEITA_COOL, JEITA_NORMAL, JEITA_WARM, JEITA_HOT };
++static const int jeita_thr[] = { 0, 10000, 45000, 50000 };
++#define JEITA_HYST		2000
++#define JEITA_WARM_FV_UV	4100000
++#define JEITA_POLL_MS		10000
++
+ struct smb_match_data {
+ 	const char *name;
+ 	enum smb_generation gen;
+@@ -557,6 +572,60 @@
+ 	power_supply_changed(chip->chg_psy);
+ }
+ 
++static int smb_set_float_voltage(struct smb_chip *chip, int uv)
++{
++	return regmap_update_bits(chip->regmap, chip->base + FLOAT_VOLTAGE_CFG,
++				  FLOAT_VOLTAGE_SETTING_MASK, (uv - 3487500) / 7500 + 1);
++}
++
++static int smb_jeita_zone(int cur, int temp)
++{
++	int zone = 0;
++
++	while (zone < ARRAY_SIZE(jeita_thr) && temp >= jeita_thr[zone])
++		zone++;
++	/* moving back towards normal only once past the threshold by JEITA_HYST */
++	if (zone < cur && cur > JEITA_NORMAL && temp > jeita_thr[cur - 1] - JEITA_HYST)
++		return cur;
++	if (zone > cur && cur < JEITA_NORMAL && temp < jeita_thr[cur] + JEITA_HYST)
++		return cur;
++	return zone;
++}
++
++static void smb_jeita_work(struct work_struct *work)
++{
++	static const char * const names[] = { "cold", "cool", "normal", "warm", "hot" };
++	struct smb_chip *chip = container_of(work, struct smb_chip, jeita_work.work);
++	int temp = 0, zone, fcc, rc;
++
++	rc = iio_read_channel_processed(chip->batt_therm_chan, &temp);
++	if (rc < 0) {
++		dev_err_ratelimited(chip->dev, "battery temperature read failed: %d\n", rc);
++		zone = JEITA_HOT;	/* fail safe: no charging without a temperature */
++	} else {
++		zone = smb_jeita_zone(chip->jeita_zone, temp);
++	}
++
++	if (zone != chip->jeita_zone) {
++		fcc = chip->batt_info->constant_charge_current_max_ua;
++		if (zone == JEITA_COOL || zone == JEITA_WARM)
++			fcc /= 2;
++		regmap_write(chip->regmap, chip->base + FAST_CHARGE_CURRENT_CFG,
++			     fcc / chip->current_step_size_ua);
++		smb_set_float_voltage(chip, zone == JEITA_WARM ?
++				      min(JEITA_WARM_FV_UV, chip->batt_info->voltage_max_design_uv) :
++				      chip->batt_info->voltage_max_design_uv);
++		regmap_update_bits(chip->regmap, chip->base + CHARGING_ENABLE_CMD,
++				   CHARGING_ENABLE_CMD_BIT,
++				   (zone == JEITA_COLD || zone == JEITA_HOT) ? 0 : CHARGING_ENABLE_CMD_BIT);
++		dev_info(chip->dev, "JEITA: battery %d mdegC -> %s (fcc %d uA)\n", temp,
++			 names[zone], (zone == JEITA_COLD || zone == JEITA_HOT) ? 0 : fcc);
++		chip->jeita_zone = zone;
++		power_supply_changed(chip->chg_psy);
++	}
++	schedule_delayed_work(&chip->jeita_work, msecs_to_jiffies(JEITA_POLL_MS));
++}
++
+ static int smb_get_iio_chan(struct smb_chip *chip, struct iio_channel *chan,
+ 			     int *val)
+ {
+@@ -1073,6 +1142,13 @@
+ 				     "Couldn't get usbin_i IIO channel\n");
+ 	}
+ 
++	chip->batt_therm_chan = devm_iio_channel_get(chip->dev, "batt_therm");
++	if (IS_ERR(chip->batt_therm_chan)) {
++		if (PTR_ERR(chip->batt_therm_chan) == -EPROBE_DEFER)
++			return -EPROBE_DEFER;
++		chip->batt_therm_chan = NULL;	/* no software JEITA */
++	}
++
+ 	match_data = (const struct smb_match_data *)device_get_match_data(chip->dev);
+ 
+ 	chip->gen = match_data->gen;
+@@ -1157,7 +1233,8 @@
+ 	 * reporting.
+ 	 */
+ 	rc = regmap_write(chip->regmap, chip->base + FAST_CHARGE_CURRENT_CFG,
+-			  1950000 / chip->current_step_size_ua);
++			  (chip->batt_therm_chan ? chip->batt_info->constant_charge_current_max_ua :
++			   1950000) / chip->current_step_size_ua);
+ 	if (rc < 0)
+ 		return dev_err_probe(chip->dev, rc,
+ 				     "Couldn't write fast charge current cfg");
+@@ -1167,6 +1244,15 @@
+ 	if (rc < 0)
+ 		return dev_err_probe(chip->dev, rc,
+ 				     "Couldn't write fast AICL rerun time");
++
++	if (chip->batt_therm_chan) {
++		chip->jeita_zone = JEITA_NORMAL;
++		rc = devm_delayed_work_autocancel(chip->dev, &chip->jeita_work, smb_jeita_work);
++		if (rc)
++			return dev_err_probe(chip->dev, rc, "Failed to init JEITA work\n");
++		schedule_delayed_work(&chip->jeita_work, 0);
++		dev_info(chip->dev, "software JEITA enabled\n");
++	}
+ 
+ 	/* Initialise charger state */
+ 	schedule_delayed_work(&chip->status_change_work, 0);

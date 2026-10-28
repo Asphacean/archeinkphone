@@ -1,0 +1,122 @@
+From: Palma 2 bring-up <none@none>
+Subject: [PATCH] drm/msm/dsi: palma2 diagnostics: raw error registers, 10nm PHY timing override
+
+Print the raw DSI status registers in dsi_err_worker and add runtime-writable
+msm.phy_timings / msm.phy_clk_pre / msm.phy_clk_post knobs for the 10nm PHY.
+---
+--- a/drivers/gpu/drm/msm/dsi/dsi_host.c	2026-10-26 13:02:42
++++ b/drivers/gpu/drm/msm/dsi/dsi_host.c	2026-10-26 13:02:42
+@@ -147,6 +147,7 @@
+ 	spinlock_t intr_lock; /* Protect interrupt ctrl register */
+ 
+ 	u32 err_work_state;
++	u32 err_raw[6];
+ 	struct work_struct err_work;
+ 	struct workqueue_struct *workqueue;
+ 
+@@ -1568,7 +1569,10 @@
+ 		container_of(work, struct msm_dsi_host, err_work);
+ 	u32 status = msm_host->err_work_state;
+ 
+-	pr_err_ratelimited("%s: status=%x\n", __func__, status);
++	pr_err_ratelimited("%s: status=%x clk=%x fifo=%x ack=%x timeout=%x status0=%x dln0_phy=%x\n",
++			   __func__, status, msm_host->err_raw[0], msm_host->err_raw[1],
++			   msm_host->err_raw[2], msm_host->err_raw[3], msm_host->err_raw[4],
++			   msm_host->err_raw[5]);
+ 	if (status & DSI_ERR_STATE_MDP_FIFO_UNDERFLOW)
+ 		dsi_sw_reset(msm_host);
+ 
+@@ -1666,6 +1670,14 @@
+ {
+ 	/* disable dsi error interrupt */
+ 	dsi_intr_ctrl(msm_host, DSI_IRQ_MASK_ERROR, 0);
++
++	/* snapshot the raw (write-1-to-clear) status registers before the handlers clear them */
++	msm_host->err_raw[0] = dsi_read(msm_host, REG_DSI_CLK_STATUS);
++	msm_host->err_raw[1] = dsi_read(msm_host, REG_DSI_FIFO_STATUS);
++	msm_host->err_raw[2] = dsi_read(msm_host, REG_DSI_ACK_ERR_STATUS);
++	msm_host->err_raw[3] = dsi_read(msm_host, REG_DSI_TIMEOUT_STATUS);
++	msm_host->err_raw[4] = dsi_read(msm_host, REG_DSI_STATUS0);
++	msm_host->err_raw[5] = dsi_read(msm_host, REG_DSI_DLN0_PHY_ERR);
+ 
+ 	dsi_clk_status(msm_host);
+ 	dsi_fifo_status(msm_host);
+--- a/drivers/gpu/drm/msm/dsi/phy/dsi_phy_10nm.c	2026-10-26 13:02:42
++++ b/drivers/gpu/drm/msm/dsi/phy/dsi_phy_10nm.c	2026-10-26 13:02:42
+@@ -13,6 +13,68 @@
+ #include "dsi_phy_10nm.xml.h"
+ 
+ /*
++ * Palma 2 bring-up knobs (/sys/module/msm/parameters/): phy_timings takes the
++ * 12 TIMING_CTRL_0..11 bytes as hex ("00,20,08,08,24,23,08,08,05,02,04,00" is
++ * the stock Boox value), clk_pre/clk_post override the host T_CLK_PRE/POST.
++ * They are applied on every PHY enable, so a DPMS off/on cycle picks them up.
++ */
++static char *phy_timings;
++module_param(phy_timings, charp, 0644);
++MODULE_PARM_DESC(phy_timings, "DSI 10nm PHY TIMING_CTRL_0..11 override, 12 hex bytes");
++static int phy_clk_pre = -1;
++module_param(phy_clk_pre, int, 0644);
++static int phy_clk_post = -1;
++module_param(phy_clk_post, int, 0644);
++
++static void dsi_10nm_phy_apply_override(struct msm_dsi_phy *phy,
++					struct msm_dsi_dphy_timing *t)
++{
++	u8 b[12];
++	int i;
++
++	if (phy_timings && *phy_timings) {
++		const char *s = phy_timings;
++
++		for (i = 0; i < 12; i++) {
++			char buf[3] = { 0, 0, 0 };
++			int v;
++
++			while (*s == ',' || *s == ' ')
++				s++;
++			if (!s[0] || !s[1] || kstrtoint((buf[0] = s[0], buf[1] = s[1], buf), 16, &v)) {
++				DRM_DEV_ERROR(&phy->pdev->dev, "phy_timings: bad byte %d\n", i);
++				return;
++			}
++			b[i] = v;
++			s += 2;
++		}
++		t->hs_halfbyte_en = b[0];
++		t->clk_zero = b[1];
++		t->clk_prepare = b[2];
++		t->clk_trail = b[3];
++		t->hs_exit = b[4];
++		t->hs_zero = b[5];
++		t->hs_prepare = b[6];
++		t->hs_trail = b[7];
++		t->hs_rqst = b[8];
++		t->ta_go = b[9] & 7;
++		t->ta_sure = b[9] >> 3;
++		t->ta_get = b[10];
++	}
++	if (phy_clk_pre >= 0)
++		t->shared_timings.clk_pre = phy_clk_pre;
++	if (phy_clk_post >= 0)
++		t->shared_timings.clk_post = phy_clk_post;
++	DRM_DEV_INFO(&phy->pdev->dev,
++		     "PHY timings%s: ctrl0..11 = %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x 00, clk_pre %u clk_post %u\n",
++		     (phy_timings && *phy_timings) ? " (override)" : "",
++		     t->hs_halfbyte_en, t->clk_zero, t->clk_prepare, t->clk_trail,
++		     t->hs_exit, t->hs_zero, t->hs_prepare, t->hs_trail, t->hs_rqst,
++		     t->ta_go | (t->ta_sure << 3), t->ta_get,
++		     t->shared_timings.clk_pre, t->shared_timings.clk_post);
++}
++
++/*
+  * DSI PLL 10nm - clock diagram (eg: DSI0):
+  *
+  *           dsi0_pll_out_div_clk  dsi0_pll_bit_clk
+@@ -806,6 +868,7 @@
+ 			"%s: D-PHY timing calculation failed\n", __func__);
+ 		return -EINVAL;
+ 	}
++	dsi_10nm_phy_apply_override(phy, timing);
+ 
+ 	if (dsi_phy_hw_v3_0_is_pll_on(phy))
+ 		pr_warn("PLL turned on before configuring PHY\n");

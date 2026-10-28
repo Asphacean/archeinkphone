@@ -1,0 +1,14 @@
+port/build/
+port/firmware/
+tools/venv/
+tools/ghidra/
+tools/edl/
+tools/loader/
+edl_config.json
+backup/
+memory/
+out/
+analysis/
+__pycache__/
+*.log
+.DS_Store

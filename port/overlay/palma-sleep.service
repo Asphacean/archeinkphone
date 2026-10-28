@@ -1,0 +1,9 @@
+[Unit]
+Description=Palma 2 sleep mode (power key: sleep clock + s2idle, RTC wake every minute)
+
+[Service]
+ExecStart=/usr/bin/python3 /usr/local/bin/palma-sleep.py
+Restart=always
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,20 @@
+#!/bin/sh
+# Sxmo e-ink menu: front light / warmth / contrast / refresh profile (helpers run via sudoers.d/palma-contrast)
+while :; do
+	read b t < /var/lib/palma2/light 2>/dev/null || { b=30; t=0; }
+	c=$(sudo -n /usr/local/bin/palma-contrast); m=$(sudo -n /usr/local/bin/palma-epd)
+	pick=$(printf '%s\n' "Light + ($b%)" "Light -" "Warm + ($t%)" "Warm -" "Contrast ($c) next" "Mode ($m) next" "Full refresh" "Close" |
+		sxmo_dmenu.sh -p E-ink) || break
+	case $pick in
+	"Light +"*) sudo -n /usr/local/bin/palma-light $((b + 10)) $t ;;
+	"Light -") sudo -n /usr/local/bin/palma-light $((b - 10)) $t ;;
+	"Warm +"*) sudo -n /usr/local/bin/palma-light $b $((t + 10)) ;;
+	"Warm -") sudo -n /usr/local/bin/palma-light $b $((t - 10)) ;;
+	Contrast*) case $c in 32) n=64;; 64) n=128;; 128) n=255;; *) n=32;; esac; sudo -n /usr/local/bin/palma-contrast $n ;;
+	Mode*) sudo -n /usr/local/bin/palma-epd next ;;
+	"Full refresh") echo 1 > /sys/module/panel_onyx_palma2_tcon/parameters/refresh_now 2>/dev/null ||
+		sudo -n /usr/local/bin/palma-epd "$m" ;;
+	*) break ;;
+	esac >/dev/null
+	superctl restart sxmo_conky >/dev/null 2>&1	# redraw the home widget (SIGUSR1 reload blanks it on wayland)
+done

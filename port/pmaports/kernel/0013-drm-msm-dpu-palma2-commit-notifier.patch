@@ -1,0 +1,110 @@
+diff -ruN a/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.c b/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.c
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.c	2026-10-27 12:09:08
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.c	2026-10-27 12:52:09
+@@ -9,11 +9,14 @@
+ 
+ #define pr_fmt(fmt)	"[drm:%s:%d] " fmt, __func__, __LINE__
+ #include <linux/debugfs.h>
++#include <linux/notifier.h>
+ #include <linux/kthread.h>
+ #include <linux/seq_file.h>
+ 
+ #include <drm/drm_atomic.h>
+ #include <drm/drm_crtc.h>
++#include <drm/drm_damage_helper.h>
++#include <drm/drm_gem_framebuffer_helper.h>
+ #include <drm/drm_file.h>
+ #include <drm/drm_probe_helper.h>
+ #include <drm/drm_framebuffer.h>
+@@ -2152,6 +2155,82 @@
+  *	(i.e. ctl flush and start) immediately.
+  * @drm_enc:	encoder pointer
+  */
++/*
++ * Palma 2: let the e-ink panel driver learn about every frame commit so it can
++ * trigger the TCON refresh over I2C (the TCON only latches a DSI frame into
++ * its memory; the waveform run must be requested separately).
++ */
++static ATOMIC_NOTIFIER_HEAD(msm_dpu_commit_notifier);
++
++int msm_dpu_commit_notifier_register(struct notifier_block *nb)
++{
++	return atomic_notifier_chain_register(&msm_dpu_commit_notifier, nb);
++}
++EXPORT_SYMBOL_GPL(msm_dpu_commit_notifier_register);
++
++int msm_dpu_commit_notifier_unregister(struct notifier_block *nb)
++{
++	return atomic_notifier_chain_unregister(&msm_dpu_commit_notifier, nb);
++}
++EXPORT_SYMBOL_GPL(msm_dpu_commit_notifier_unregister);
++
++/*
++ * Palma 2: share of the screen this commit changed, in 1/1000. KWin sends no
++ * FB_DAMAGE_CLIPS, so sample the scanout: 4x4 pixels in every 32x32 tile,
++ * compared with the previous frame; a tile counts as changed if any sample
++ * differs. ~20k uncached reads per commit. The e-ink driver weighs its periodic
++ * full refresh by it, so a ticking clock or a marquee is not a page turn.
++ */
++#define PALMA_TILE	32
++#define PALMA_TX	64
++#define PALMA_TY	32
++static u32 palma_prev[PALMA_TY][PALMA_TX][16];
++
++static unsigned long dpu_encoder_damage_permille(struct drm_encoder *drm_enc)
++{
++	struct drm_crtc *crtc = drm_enc->crtc;
++	struct drm_plane *plane, *best = NULL;
++	struct drm_framebuffer *fb;
++	struct drm_gem_object *obj;
++	unsigned int tx, ty, x, y, i, nx, ny, changed = 0;
++	u8 *base;
++
++	if (!crtc || !crtc->state)
++		return 1000;
++	drm_for_each_plane_mask(plane, crtc->dev, crtc->state->plane_mask)
++		if (plane->state && plane->state->fb && (!best || plane->state->crtc_w > best->state->crtc_w))
++			best = plane;
++	if (!best)
++		return 1000;
++	fb = best->state->fb;
++	if (fb->format->cpp[0] != 4)
++		return 1000;
++	nx = min_t(unsigned int, DIV_ROUND_UP(fb->width, PALMA_TILE), PALMA_TX);
++	ny = min_t(unsigned int, DIV_ROUND_UP(fb->height, PALMA_TILE), PALMA_TY);
++	obj = drm_gem_fb_get_obj(fb, 0);
++	base = obj ? msm_gem_get_vaddr(obj) : NULL;
++	if (IS_ERR_OR_NULL(base))
++		return 1000;
++	base += fb->offsets[0];
++	for (ty = 0; ty < ny; ty++)
++		for (tx = 0; tx < nx; tx++) {
++			bool diff = false;
++
++			for (i = 0; i < 16; i++) {
++				u32 v;
++
++				x = min(tx * PALMA_TILE + (i & 3) * 8 + 4, fb->width - 1);
++				y = min(ty * PALMA_TILE + (i >> 2) * 8 + 4, fb->height - 1);
++				v = READ_ONCE(*(u32 *)(base + y * fb->pitches[0] + x * 4));
++				diff |= v != palma_prev[ty][tx][i];
++				palma_prev[ty][tx][i] = v;
++			}
++			changed += diff;
++		}
++	msm_gem_put_vaddr(obj);
++	return changed * 1000 / (nx * ny);
++}
++
+ void dpu_encoder_kickoff(struct drm_encoder *drm_enc)
+ {
+ 	struct dpu_encoder_virt *dpu_enc;
+@@ -2165,6 +2244,8 @@
+ 
+ 	/* All phys encs are ready to go, trigger the kickoff */
+ 	_dpu_encoder_kickoff_phys(dpu_enc);
++	atomic_notifier_call_chain(&msm_dpu_commit_notifier, DRMID(drm_enc),
++				   (void *)dpu_encoder_damage_permille(drm_enc));
+ 
+ 	/* allow phys encs to handle any post-kickoff business */
+ 	for (i = 0; i < dpu_enc->num_phys_encs; i++) {

@@ -1,0 +1,28 @@
+From: Palma 2 bring-up <none@none>
+Subject: [PATCH] power: supply: qcom_qg: report charge status from the charger
+
+---
+diff -ruN a/drivers/power/supply/qcom_qg.c b/drivers/power/supply/qcom_qg.c
+--- a/drivers/power/supply/qcom_qg.c	2026-10-27 13:15:24
++++ b/drivers/power/supply/qcom_qg.c	2026-10-27 13:15:33
+@@ -130,9 +130,18 @@
+ 	int ret;
+ 
+ 	switch (psp) {
+-	case POWER_SUPPLY_PROP_STATUS:
+-		val->intval = POWER_SUPPLY_STATUS_UNKNOWN;
++	case POWER_SUPPLY_PROP_STATUS: {
++		int cap;
++
++		/* the gauge has no charge state of its own: take the charger's (DT power-supplies) */
++		if (power_supply_get_property_from_supplier(psy, POWER_SUPPLY_PROP_STATUS, val))
++			val->intval = power_supply_am_i_supplied(psy) > 0 ?
++				      POWER_SUPPLY_STATUS_CHARGING : POWER_SUPPLY_STATUS_DISCHARGING;
++		if (val->intval == POWER_SUPPLY_STATUS_CHARGING &&
++		    !qcom_qg_get_capacity(chip, &cap) && cap >= 100)
++			val->intval = POWER_SUPPLY_STATUS_FULL;
+ 		break;
++	}
+ 	case POWER_SUPPLY_PROP_TECHNOLOGY:
+ 		val->intval = POWER_SUPPLY_TECHNOLOGY_LION;
+ 		break;

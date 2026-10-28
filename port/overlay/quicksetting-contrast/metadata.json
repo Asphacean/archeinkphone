@@ -1,0 +1,11 @@
+{
+    "KPackageStructure": "KPackage/GenericQML",
+    "KPlugin": {
+        "Description": "E-ink TCON contrast (Boox Palma 2)",
+        "Icon": "contrast",
+        "Id": "org.palma2.quicksetting.contrast",
+        "License": "GPL",
+        "Name": "Contrast",
+        "Name[ru]": "Контраст"
+    }
+}

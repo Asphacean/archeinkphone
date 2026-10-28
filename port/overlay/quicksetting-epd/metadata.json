@@ -1,0 +1,11 @@
+{
+    "KPackageStructure": "KPackage/GenericQML",
+    "KPlugin": {
+        "Description": "E-ink refresh profile (Boox Palma 2)",
+        "Icon": "view-refresh",
+        "Id": "org.palma2.quicksetting.epd",
+        "License": "GPL",
+        "Name": "E-ink mode",
+        "Name[ru]": "Режим экрана"
+    }
+}

@@ -1,0 +1,35 @@
+diff -ruN tree.p10/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys_vid.c tree/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys_vid.c
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys_vid.c	2026-10-26 20:54:56
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys_vid.c	2026-10-26 20:55:24
+@@ -222,6 +222,19 @@
+  *
+  * @timing: Pointer to the intf timing information for the requested mode
+  */
++/*
++ * Onyx Boox Palma 2 (sm6350, DSI video -> FPGA TCON): when the programmable
++ * fetch uses the whole vertical front porch, mainline starts the fetch on the
++ * first line after the active region (vtotal - vfp).  On this platform that
++ * makes the DSI video engine report VIDEO_MDP/lane FIFO over+underflow at every
++ * frame boundary, the TCON rejects every frame and ~50 % of link enables leave
++ * the data lanes in LP-11.  The stock kernel starts the fetch one line later
++ * (vtotal - vfp + 1).  dpu_prog_fetch_adj (lines, default -1) is applied to the
++ * number of VFP lines used for the fetch.
++ */
++static int dpu_prog_fetch_adj = -1;
++module_param(dpu_prog_fetch_adj, int, 0644);
++
+ static void programmable_fetch_config(struct dpu_encoder_phys *phys_enc,
+ 				      const struct dpu_hw_intf_timing_params *timing)
+ {
+@@ -236,6 +249,11 @@
+ 		return;
+ 
+ 	vfp_fetch_lines = programmable_fetch_get_num_lines(phys_enc, timing);
++	if (vfp_fetch_lines && dpu_prog_fetch_adj < 0 &&
++	    (u32)(-dpu_prog_fetch_adj) < vfp_fetch_lines)
++		vfp_fetch_lines -= (u32)(-dpu_prog_fetch_adj);
++	else if (vfp_fetch_lines && dpu_prog_fetch_adj > 0)
++		vfp_fetch_lines += dpu_prog_fetch_adj;
+ 	if (vfp_fetch_lines) {
+ 		vert_total = get_vertical_total(timing);
+ 		horiz_total = get_horizontal_total(timing);

@@ -1,0 +1,3 @@
+#!/bin/sh
+# wvkbd -o prints one line per key press: short LRA tick for each
+while read -r _; do sxmo_vibrate 30 1 & done
